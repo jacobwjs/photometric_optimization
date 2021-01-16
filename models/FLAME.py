@@ -28,7 +28,7 @@ class Struct(object):
 def rot_mat_to_euler(rot_mats):
     # Calculates rotation matrix to euler angles
     # Careful for extreme cases of eular angles like [0.0, pi, 0.0]
-
+    #
     sy = torch.sqrt(rot_mats[:, 0, 0] * rot_mats[:, 0, 0] +
                     rot_mats[:, 1, 0] * rot_mats[:, 1, 0])
     return torch.atan2(-rot_mats[:, 2, 0], sy)
@@ -36,7 +36,7 @@ def rot_mat_to_euler(rot_mats):
 class FLAME(nn.Module):
     """
     Given flame parameters this class generates a differentiable FLAME function
-    which outputs the a mesh and 2D/3D facial landmarks
+    which outputs a mesh and 2D/3D facial landmarks
     """
 
     def __init__(self, config):
@@ -53,7 +53,8 @@ class FLAME(nn.Module):
         self.register_buffer('v_template', to_tensor(to_np(flame_model.v_template), dtype=self.dtype))
         # The shape components and expression
         shapedirs = to_tensor(to_np(flame_model.shapedirs), dtype=self.dtype)
-        shapedirs = torch.cat([shapedirs[:,:,:config.shape_params], shapedirs[:,:,300:300+config.expression_params]], 2)
+        shapedirs = torch.cat([shapedirs[:,:,:config.shape_params],
+                               shapedirs[:,:,300:300+config.expression_params]], 2)
         self.register_buffer('shapedirs', shapedirs)
         # The pose components
         num_pose_basis = flame_model.posedirs.shape[-1]
@@ -94,7 +95,7 @@ class FLAME(nn.Module):
                                           dynamic_lmk_b_coords,
                                           neck_kin_chain, dtype=torch.float32):
         """
-            Selects the face contour depending on the reletive position of the head
+            Selects the face contour depending on the relative position of the head
             Input:
                 vertices: N X num_of_vertices X 3
                 pose: N X full pose
@@ -156,11 +157,11 @@ class FLAME(nn.Module):
         # Extract the indices of the vertices for each face
         # NxLx3
         batch_size, num_verts = vertices.shape[:dd2]
-        lmk_faces = torch.index_select(faces, 0, lmk_faces_idx.view(-1)).view(
-            1, -1, 3).view(batch_size, lmk_faces_idx.shape[1], -1)
+        lmk_faces = torch.index_select(faces, 0, lmk_faces_idx.view(-1)) \
+                         .view(1, -1, 3).view(batch_size, lmk_faces_idx.shape[1], -1)
 
-        lmk_faces += torch.arange(batch_size, dtype=torch.long).view(-1, 1, 1).to(
-            device=vertices.device) * num_verts
+        lmk_faces += torch.arange(batch_size, dtype=torch.long) \
+                          .view(-1, 1, 1).to(device=vertices.device) * num_verts
 
         lmk_vertices = vertices.view(-1, 3)[lmk_faces]
         landmarks = torch.einsum('blfi,blf->bli', [lmk_vertices, lmk_bary_coords])
@@ -186,7 +187,8 @@ class FLAME(nn.Module):
         if eye_pose_params is None:
             eye_pose_params = self.eye_pose.expand(batch_size, -1)
         betas = torch.cat([shape_params, expression_params], dim=1)
-        full_pose = torch.cat([pose_params[:, :3], self.neck_pose.expand(batch_size, -1), pose_params[:, 3:], eye_pose_params], dim=1)
+        full_pose = torch.cat([pose_params[:, :3], self.neck_pose.expand(batch_size, -1),
+                               pose_params[:, 3:], eye_pose_params], dim=1)
         template_vertices = self.v_template.unsqueeze(0).expand(batch_size, -1, -1)
 
         # import ipdb; ipdb.set_trace()
@@ -199,9 +201,9 @@ class FLAME(nn.Module):
         lmk_bary_coords = self.lmk_bary_coords.unsqueeze(dim=0).expand(batch_size, -1, -1)
         
         dyn_lmk_faces_idx, dyn_lmk_bary_coords = self._find_dynamic_lmk_idx_and_bcoords(
-            full_pose, self.dynamic_lmk_faces_idx,
-            self.dynamic_lmk_bary_coords,
-            self.neck_kin_chain, dtype=self.dtype)
+                                                        full_pose, self.dynamic_lmk_faces_idx,
+                                                        self.dynamic_lmk_bary_coords,
+                                                        self.neck_kin_chain, dtype=self.dtype)
         lmk_faces_idx = torch.cat([dyn_lmk_faces_idx, lmk_faces_idx], 1)
         lmk_bary_coords = torch.cat([dyn_lmk_bary_coords, lmk_bary_coords], 1)
 
@@ -237,6 +239,15 @@ class FLAMETex(nn.Module):
     def forward(self, texcode):
         texture = self.texture_mean + (self.texture_basis*texcode[:,None,:]).sum(-1)
         texture = texture.reshape(texcode.shape[0], 512, 512, 3).permute(0,3,1,2)
+        texture = F.interpolate(texture, [256, 256])
+        texture = texture[:,[2,1,0], :,:]
+        return texture
+    
+    def get_texture_mean(self, batch_size):
+        ''' Used as a regularizer on texuture for training regression models. '''
+        texture_mean = self.texture_mean
+        texture = texture_mean # + (self.texture_basis*texcode[:,None,:]).sum(-1)
+        texture = texture.reshape(1, 512, 512, 3).permute(0,3,1,2)
         texture = F.interpolate(texture, [256, 256])
         texture = texture[:,[2,1,0], :,:]
         return texture

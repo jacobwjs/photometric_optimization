@@ -129,9 +129,9 @@ class Renderer(nn.Module):
 
     def forward(self, vertices, transformed_vertices, albedos, lights=None, light_type='point'):
         '''
-        lihgts:
+        lights:
             spherical homarnic: [N, 9(shcoeff), 3(rgb)]
-        vertices: [N, V, 3], vertices in work space, for calculating normals, then shading
+        vertices: [N, V, 3], vertices in world space, for calculating normals, then shading
         transformed_vertices: [N, V, 3], range(-1, 1), projected vertices, for rendering
         '''
         batch_size = vertices.shape[0]
@@ -174,18 +174,15 @@ class Renderer(nn.Module):
                     shading = self.add_pointlight(vertice_images.permute(0, 2, 3, 1).reshape([batch_size, -1, 3]),
                                                   normal_images.permute(0, 2, 3, 1).reshape([batch_size, -1, 3]),
                                                   lights)
-                    shading_images = shading.reshape(
-                        [batch_size, lights.shape[1], albedo_images.shape[2], albedo_images.shape[3], 3]).permute(0, 1,
-                                                                                                                  4, 2,
-                                                                                                                  3)
+                    shading_images = shading.reshape([batch_size, lights.shape[1],
+                                                      albedo_images.shape[2],
+                                                      albedo_images.shape[3], 3]).permute(0, 1, 4, 2, 3)
                     shading_images = shading_images.mean(1)
                 else:
-                    shading = self.add_directionlight(normal_images.permute(0, 2, 3, 1).reshape([batch_size, -1, 3]),
-                                                      lights)
-                    shading_images = shading.reshape(
-                        [batch_size, lights.shape[1], albedo_images.shape[2], albedo_images.shape[3], 3]).permute(0, 1,
-                                                                                                                  4, 2,
-                                                                                                                  3)
+                    shading = self.add_directionlight(normal_images.permute(0, 2, 3, 1).reshape([batch_size, -1, 3]), lights)
+                    shading_images = shading.reshape([batch_size, lights.shape[1],
+                                                      albedo_images.shape[2],
+                                                      albedo_images.shape[3], 3]).permute(0, 1, 4, 2, 3)
                     shading_images = shading_images.mean(1)
             images = albedo_images * shading_images
         else:
@@ -248,7 +245,7 @@ class Renderer(nn.Module):
         shading = normals_dot_lights[:, :, :, None] * light_intensities[:, :, None, :]
         return shading
 
-    def render_shape(self, vertices, transformed_vertices, images=None, lights=None):
+    def render_shape(self, vertices, transformed_vertices, images=None, lights=None, debug=False):
         batch_size = vertices.shape[0]
         if lights is None:
             light_positions = torch.tensor([[-0.1, -0.1, 0.2],
@@ -278,16 +275,19 @@ class Renderer(nn.Module):
         if lights.shape[1] == 9:
             shading_images = self.add_SHlight(normal_images, lights)
         else:
-            print('directional')
+            if debug: print('directional')
             shading = self.add_directionlight(normal_images.permute(0, 2, 3, 1).reshape([batch_size, -1, 3]), lights)
-
-            shading_images = shading.reshape(
-                [batch_size, lights.shape[1], albedo_images.shape[2], albedo_images.shape[3], 3]).permute(0, 1, 4, 2, 3)
+            shading_images = shading.reshape([batch_size,
+                                              lights.shape[1],
+                                              albedo_images.shape[2],
+                                              albedo_images.shape[3],
+                                              3]).permute(0, 1, 4, 2, 3)
             shading_images = shading_images.mean(1)
+            
         images = albedo_images * shading_images
-
         return images
 
+    
     def render_normal(self, transformed_vertices, normals):
         '''
         -- rendering normal
@@ -304,6 +304,7 @@ class Renderer(nn.Module):
         normal_images = rendering[:, :3, :, :]
         return normal_images
 
+    
     def world2uv(self, vertices):
         '''
         sample vertices from world space to uv space
