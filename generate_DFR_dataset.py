@@ -140,7 +140,10 @@ def generate_train_data(args, g_ema,
     for i in pbar:
         with torch.no_grad():
             images = []
-            batch_latents = g_ema.get_latent(torch.randn((args.batch_size, 18, 512)).to(device)).to('cpu')
+            batch_latents = g_ema.get_latent(torch.randn((args.batch_size,
+                                                          18,
+                                                          512)).to(device)).to('cpu')
+            
             imgs_gen, _ = g_ema([batch_latents.to(device)], **kwargs)
             imgs_gen = imgs_gen.cpu()
             images.append(normalize_float_img(imgs_gen))
