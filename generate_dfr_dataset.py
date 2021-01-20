@@ -40,8 +40,9 @@ def load_facesegment(base_path, device):
 
 
 def load_generator(base_path, device):
-    sys.path.append(f'{base_path}/stylegan2-pytorch/')
-    from model import Generator
+    sys.path.append(f'{base_path}/stylegan2_pytorch')
+#     from model import Generator
+    from stylegan2_pytorch.model import Generator
     
     # Create a directory and mount bucket.
     #
