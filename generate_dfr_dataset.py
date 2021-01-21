@@ -171,11 +171,11 @@ def generate_train_data(args, g_ema,
                                                                     image_masks)):
                 example = None
                 example = {
-                    'latents': latent,
-                    'landmarks_2d_gt': landmark_2d,
-                    'landmarks_3d_gt': landmark_3d,
-                    'images': image,
-                    'image_masks': mask
+                    'latents': latent.detach().cpu(),
+                    'landmarks_2d_gt': landmark_2d.detach().cpu(),
+                    'landmarks_3d_gt': landmark_3d.detach().cpu(),
+                    'images': image.detach().cpu(),
+                    'image_masks': mask.detach().cpu()
                 }
 
                 idx = (i * args.batch_size) + j
@@ -416,4 +416,6 @@ if __name__ == "__main__":
 #     del g_ema
     
     
-    
+# Example of commandline run:
+#
+# python generate_dfr_dataset.py --size=20 --batch_size=10 --truncation=0.2 --workers=10 --base_path=/home/ec2-user/SageMaker --save_dir=/home/ec2-user/SageMaker/train_data_trunc02

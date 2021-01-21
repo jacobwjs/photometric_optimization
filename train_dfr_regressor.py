@@ -149,38 +149,51 @@ class DatasetDFR(data.Dataset):
     
     
 
-def save_checkpoint(path, epoch, model, losses=None):
+def save_checkpoint(path, epoch, model, optim, losses=None):
     epoch = str(epoch).zfill(6)
     
     if losses is not None:
         torch.save(losses, f'{path}/losses_epoch{epoch}.pkl')
     
     model_data = {
-        'dfr': model.cpu().state_dict(),
+        'epoch': epoch,
+        'dfr': model.state_dict(),
+        'optim': optim.state_dict()
     }
     torch.save(model_data, f'{path}/dfr_ckpt_epoch{epoch}.pt')
 
 
     
-def save_rendered_imgs(savefolder, epoch, images, predicted_images, shape_images, albedos, albedo_images,
-                       landmarks_gt, landmarks2d, landmarks3d):
+def save_rendered_imgs(savefolder, 
+                       epoch,
+                       images,
+                       landmarks_gt,
+                       landmarks2d,
+                       landmarks3d=None,
+                       predicted_images=None,
+                       shape_images=None,
+                       albedos=None,
+                       albedo_images=None):
     grids = {}
-    # visind = range(bz)  # [0]
     grids['images'] = torchvision.utils.make_grid(images).detach().cpu()
     grids['landmarks_gt'] = torchvision.utils.make_grid(
         util.tensor_vis_landmarks(images.clone().detach(), landmarks_gt))
     grids['landmarks2d'] = torchvision.utils.make_grid(
         util.tensor_vis_landmarks(images, landmarks2d))
-    grids['landmarks3d'] = torchvision.utils.make_grid(
-        util.tensor_vis_landmarks(images, landmarks3d))
-    grids['albedoimage'] = torchvision.utils.make_grid(albedo_images)
-    grids['render'] = torchvision.utils.make_grid(predicted_images.detach().float().cpu())
-#     shape_images = render.render_shape(vertices, trans_vertices, images)
-    grids['shape'] = torchvision.utils.make_grid(
-        F.interpolate(shape_images, [224, 224])).detach().float().cpu()
+    
+    if landmarks3d is not None:
+        grids['landmarks3d'] = torchvision.utils.make_grid(
+            util.tensor_vis_landmarks(images, landmarks3d))
+    if albedo_images is not None:
+        grids['albedoimage'] = torchvision.utils.make_grid(albedo_images)
+    if predicted_images is not None:
+        grids['render'] = torchvision.utils.make_grid(predicted_images)
+    if shape_images is not None:
+        grids['shape'] = torchvision.utils.make_grid(
+            F.interpolate(shape_images, [224, 224])).detach().float().cpu()
+    if albedos is not None:
+        grids['tex'] = torchvision.utils.make_grid(F.interpolate(albedos, [224, 224])).detach().cpu()
 
-
-    grids['tex'] = torchvision.utils.make_grid(F.interpolate(albedos, [224, 224])).detach().cpu()
     grid = torch.cat(list(grids.values()), 1)
     grid_image = (grid.numpy().transpose(1, 2, 0).copy() * 255)[:, :, [2, 1, 0]]
     grid_image = np.minimum(np.maximum(grid_image, 0), 255).astype(np.uint8)
@@ -304,188 +317,186 @@ def train(args, config, loader, dfr, flame, flametex, render, tex_mean, device):
             )
 
             
-            if (k % modulo_save_imgs == 0):
-                try:
-                    grids = {}
-                    grids['images'] = torchvision.utils.make_grid(images.detach().cpu())
-                    grids['landmarks_2d_gt'] = torchvision.utils.make_grid(
-                        util.tensor_vis_landmarks(images, landmarks_2d_gt))
-                    grids['landmarks2d'] = torchvision.utils.make_grid(
-                        util.tensor_vis_landmarks(images, landmarks2d))
-                    grids['landmarks3d'] = torchvision.utils.make_grid(
-                        util.tensor_vis_landmarks(images, landmarks3d))
-
-                    grid = torch.cat(list(grids.values()), 1)
-                    grid_image = (grid.numpy().transpose(1, 2, 0).copy() * 255)[:, :, [2, 1, 0]]
-                    grid_image = np.minimum(np.maximum(grid_image, 0), 255).astype(np.uint8)
-                    cv2.imwrite('{}/{}.jpg'.format(savefolder, str(k).zfill(6)), grid_image)
-                except:
-                    print("Error saving images... continuing")
-                    continue
-                
-            if k % modulo_save_model == 0:
-                save_checkpoint(path=savefolder,
-                                epoch=k+1,
-                                losses=losses_to_plot,
-                                model=dfr)   
-    
-    # Save final epoch for rigid fitting.
-    #
-    if k > 0:
-        save_checkpoint(path=savefolder,
-                        epoch=k+1,
-                        losses=losses_to_plot,
-                        model=dfr)
-    
-    
-    # Second stage training. Adding in photometric loss.
-    #
-    pbar = tqdm(range(idx_rigid_stop, args.iter), dynamic_ncols=True, smoothing=0.01)
-    for k in pbar:
-        for example in dataloader:
-            latents = example['latents'].to(device)
-            landmarks_2d_gt = example['landmarks_2d_gt'].to(device)
-            landmarks_3d_gt = example['landmarks_3d_gt'].to(device)
-            images = example['images'].to(device)
-            image_masks = example['image_masks'].to(device)
-
-
-#             shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
-            shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
-            vertices, landmarks2d, landmarks3d = flame(shape_params=shape,
-                                                       expression_params=expression,
-                                                       pose_params=pose)
-
-
-            trans_vertices = util.batch_orth_proj(vertices, cam);
-            trans_vertices[..., 1:] = - trans_vertices[..., 1:]
-            landmarks2d = util.batch_orth_proj(landmarks2d, cam);
-            landmarks2d[..., 1:] = - landmarks2d[..., 1:]
-            landmarks3d = util.batch_orth_proj(landmarks3d, cam);
-            landmarks3d[..., 1:] = - landmarks3d[..., 1:]
-
-
-            losses = {}
-            
-#             if k < 250:
-#                 losses['landmark_2d'] = util.l2_distance(landmarks2d[:, 17:, :2],
-#                                                       landmarks_2d_gt[:, 17:, :2]) * 2.0 #config.w_lmks
-#             else:
-#                 losses['landmark_2d'] = util.l2_distance(landmarks2d[:, :, :2],
-#                                                       landmarks_2d_gt[:, :, :2]) * 2.0
-            losses['landmark_2d'] = util.l2_distance(landmarks2d[:, :, :2],
-                                                      landmarks_2d_gt[:, :, :2]) * 2.0
-    
-            losses['landmark_3d'] = util.l2_distance(landmarks3d[:, :, :2],
-                                                      landmarks_3d_gt[:, :, :2]) * 1.0
-            losses['shape_reg'] = (torch.sum(shape ** 2) / 2) * config.w_shape_reg  # *1e-4
-            losses['expression_reg'] = (torch.sum(expression ** 2) / 2) * config.w_expr_reg  # *1e-4
-            losses['pose_reg'] = (torch.sum(pose ** 2) / 2) * config.w_pose_reg
-
-
-            ## render
-            albedos = flametex(tex) / 255.
-            losses['texture_reg'] = loss_mse(albedos, tex_mean.repeat(args.batch_size, 1, 1, 1)) #* 1e-3 # Regularize learned texture.
-            ops = render(vertices, trans_vertices, albedos, lights)
-            predicted_images = ops['images']
-            losses['photometric_texture'] = (image_masks * (predicted_images - images).abs()).mean() \
-                                            * config.w_pho
-
-
-            all_loss = 0.
-            for key in losses.keys():
-                all_loss = all_loss + losses[key]
-                losses_to_plot[key].append(losses[key].item()) # Store for plotting later.
-
-            losses['all_loss'] = all_loss
-            losses_to_plot['all_loss'].append(losses['all_loss'].item())
-
-
-            optim.zero_grad()
-            all_loss.backward()
-            optim.step()
-#             scheduler.step(all_loss)
-
-
-            pbar.set_description(
-                (
-                    f"total: {losses['all_loss']:.4f}; landmark_2d: {losses['landmark_2d']:.4f}; "
-                    f"landmark_3d: {losses['landmark_3d']:.4f}; "
-                    f"shape: {losses['shape_reg']:.4f}; express: {losses['expression_reg']:.4f}; "
-                    f"photo: {losses['photometric_texture']:.4f}; "
-                )
-            )
-
-
-            # visualize
-            if k % modulo_save_imgs == 0:
-                shape_images = render.render_shape(vertices, trans_vertices, images)
-                save_rendered_imgs(savefolder, k, images, predicted_images, shape_images,
-                                   albedos, ops, landmarks_2d_gt, landmarks2d, landmarks3d)
+#             if (k % modulo_save_imgs == 0):
 #                 try:
-# #                     grids = {}
-# #     #                 visind = range(bz)  # [0]
-# #                     grids['images'] = torchvision.utils.make_grid(images).detach().cpu()
-# #                     grids['landmarks_gt'] = torchvision.utils.make_grid(
-# #                         util.tensor_vis_landmarks(images.clone().detach(), landmarks_gt))
-# #                     grids['landmarks2d'] = torchvision.utils.make_grid(
-# #                         util.tensor_vis_landmarks(images, landmarks2d))
-# #                     grids['landmarks3d'] = torchvision.utils.make_grid(
-# #                         util.tensor_vis_landmarks(images, landmarks3d))
-# #                     grids['albedoimage'] = torchvision.utils.make_grid(
-# #                         (ops['albedo_images']).detach().cpu())
-# #                     grids['render'] = torchvision.utils.make_grid(predicted_images.detach().float().cpu())
-# #                     shape_images = render.render_shape(vertices, trans_vertices, images)
-# #                     grids['shape'] = torchvision.utils.make_grid(
-# #                         F.interpolate(shape_images, [224, 224])).detach().float().cpu()
+#                     grids = {}
+#                     grids['images'] = torchvision.utils.make_grid(images.detach().cpu())
+#                     grids['landmarks_2d_gt'] = torchvision.utils.make_grid(
+#                         util.tensor_vis_landmarks(images, landmarks_2d_gt))
+#                     grids['landmarks2d'] = torchvision.utils.make_grid(
+#                         util.tensor_vis_landmarks(images, landmarks2d))
+#                     grids['landmarks3d'] = torchvision.utils.make_grid(
+#                         util.tensor_vis_landmarks(images, landmarks3d))
 
-
-# #                     grids['tex'] = torchvision.utils.make_grid(F.interpolate(albedos, [224, 224])).detach().cpu()
-# #                     grid = torch.cat(list(grids.values()), 1)
-# #                     grid_image = (grid.numpy().transpose(1, 2, 0).copy() * 255)[:, :, [2, 1, 0]]
-# #                     grid_image = np.minimum(np.maximum(grid_image, 0), 255).astype(np.uint8)
-
-# #                     cv2.imwrite('{}/{}.jpg'.format(savefolder, str(k).zfill(6)), grid_image) 
-
-#                     shape_images = render.render_shape(vertices, trans_vertices, images)
-#                     save_rendered_imgs(savefolder, k, images, predicted_images, shape_images, albedos, ops,
-#                                        landmarks_gt, landmarks2d, landmarks3d)
+#                     grid = torch.cat(list(grids.values()), 1)
+#                     grid_image = (grid.numpy().transpose(1, 2, 0).copy() * 255)[:, :, [2, 1, 0]]
+#                     grid_image = np.minimum(np.maximum(grid_image, 0), 255).astype(np.uint8)
+#                     cv2.imwrite('{}/{}.jpg'.format(savefolder, str(k).zfill(6)), grid_image)
 #                 except:
-#                     print("Error saving images and renderings... continuing")
+#                     print("Error saving images... continuing")
 #                     continue
+                
+#             if k % modulo_save_model == 0:
+#                 save_checkpoint(path=savefolder,
+#                                 epoch=k+1,
+#                                 losses=losses_to_plot,
+#                                 model=dfr)   
+    
+#     # Save final epoch for rigid fitting.
+#     #
+#     if k > 0:
+#         save_checkpoint(path=savefolder,
+#                         epoch=k+1,
+#                         losses=losses_to_plot,
+#                         model=dfr)
+    
+    
+#     # Second stage training. Adding in photometric loss.
+#     #
+#     pbar = tqdm(range(idx_rigid_stop, args.iter), dynamic_ncols=True, smoothing=0.01)
+#     for k in pbar:
+#         for example in dataloader:
+#             latents = example['latents'].to(device)
+#             landmarks_2d_gt = example['landmarks_2d_gt'].to(device)
+#             landmarks_3d_gt = example['landmarks_3d_gt'].to(device)
+#             images = example['images'].to(device)
+#             image_masks = example['image_masks'].to(device)
+
+
+# #             shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
+#             shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
+#             vertices, landmarks2d, landmarks3d = flame(shape_params=shape,
+#                                                        expression_params=expression,
+#                                                        pose_params=pose)
+
+
+#             trans_vertices = util.batch_orth_proj(vertices, cam);
+#             trans_vertices[..., 1:] = - trans_vertices[..., 1:]
+#             landmarks2d = util.batch_orth_proj(landmarks2d, cam);
+#             landmarks2d[..., 1:] = - landmarks2d[..., 1:]
+#             landmarks3d = util.batch_orth_proj(landmarks3d, cam);
+#             landmarks3d[..., 1:] = - landmarks3d[..., 1:]
+
+
+#             losses = {}
+            
+# #             if k < 250:
+# #                 losses['landmark_2d'] = util.l2_distance(landmarks2d[:, 17:, :2],
+# #                                                       landmarks_2d_gt[:, 17:, :2]) * 2.0 #config.w_lmks
+# #             else:
+# #                 losses['landmark_2d'] = util.l2_distance(landmarks2d[:, :, :2],
+# #                                                       landmarks_2d_gt[:, :, :2]) * 2.0
+#             losses['landmark_2d'] = util.l2_distance(landmarks2d[:, :, :2],
+#                                                       landmarks_2d_gt[:, :, :2]) * 2.0
+    
+#             losses['landmark_3d'] = util.l2_distance(landmarks3d[:, :, :2],
+#                                                       landmarks_3d_gt[:, :, :2]) * 1.0
+#             losses['shape_reg'] = (torch.sum(shape ** 2) / 2) * config.w_shape_reg  # *1e-4
+#             losses['expression_reg'] = (torch.sum(expression ** 2) / 2) * config.w_expr_reg  # *1e-4
+#             losses['pose_reg'] = (torch.sum(pose ** 2) / 2) * config.w_pose_reg
+
+
+#             ## render
+#             albedos = flametex(tex) / 255.
+#             losses['texture_reg'] = loss_mse(albedos, tex_mean.repeat(args.batch_size, 1, 1, 1)) #* 1e-3 # Regularize learned texture.
+#             ops = render(vertices, trans_vertices, albedos, lights)
+#             predicted_images = ops['images']
+#             losses['photometric_texture'] = (image_masks * (predicted_images - images).abs()).mean() \
+#                                             * config.w_pho
+
+
+#             all_loss = 0.
+#             for key in losses.keys():
+#                 all_loss = all_loss + losses[key]
+#                 losses_to_plot[key].append(losses[key].item()) # Store for plotting later.
+
+#             losses['all_loss'] = all_loss
+#             losses_to_plot['all_loss'].append(losses['all_loss'].item())
+
+
+#             optim.zero_grad()
+#             all_loss.backward()
+#             optim.step()
+# #             scheduler.step(all_loss)
+
+
+#             pbar.set_description(
+#                 (
+#                     f"total: {losses['all_loss']:.4f}; landmark_2d: {losses['landmark_2d']:.4f}; "
+#                     f"landmark_3d: {losses['landmark_3d']:.4f}; "
+#                     f"shape: {losses['shape_reg']:.4f}; express: {losses['expression_reg']:.4f}; "
+#                     f"photo: {losses['photometric_texture']:.4f}; "
+#                 )
+#             )
+
+
+#             # visualize
+#             if k % modulo_save_imgs == 0:
+#                 shape_images = render.render_shape(vertices, trans_vertices, images)
+#                 save_rendered_imgs(savefolder, k, images, predicted_images, shape_images,
+#                                    albedos, ops, landmarks_2d_gt, landmarks2d, landmarks3d)
+# #                 try:
+# # #                     grids = {}
+# # #     #                 visind = range(bz)  # [0]
+# # #                     grids['images'] = torchvision.utils.make_grid(images).detach().cpu()
+# # #                     grids['landmarks_gt'] = torchvision.utils.make_grid(
+# # #                         util.tensor_vis_landmarks(images.clone().detach(), landmarks_gt))
+# # #                     grids['landmarks2d'] = torchvision.utils.make_grid(
+# # #                         util.tensor_vis_landmarks(images, landmarks2d))
+# # #                     grids['landmarks3d'] = torchvision.utils.make_grid(
+# # #                         util.tensor_vis_landmarks(images, landmarks3d))
+# # #                     grids['albedoimage'] = torchvision.utils.make_grid(
+# # #                         (ops['albedo_images']).detach().cpu())
+# # #                     grids['render'] = torchvision.utils.make_grid(predicted_images.detach().float().cpu())
+# # #                     shape_images = render.render_shape(vertices, trans_vertices, images)
+# # #                     grids['shape'] = torchvision.utils.make_grid(
+# # #                         F.interpolate(shape_images, [224, 224])).detach().float().cpu()
+
+
+# # #                     grids['tex'] = torchvision.utils.make_grid(F.interpolate(albedos, [224, 224])).detach().cpu()
+# # #                     grid = torch.cat(list(grids.values()), 1)
+# # #                     grid_image = (grid.numpy().transpose(1, 2, 0).copy() * 255)[:, :, [2, 1, 0]]
+# # #                     grid_image = np.minimum(np.maximum(grid_image, 0), 255).astype(np.uint8)
+
+# # #                     cv2.imwrite('{}/{}.jpg'.format(savefolder, str(k).zfill(6)), grid_image) 
+
+# #                     shape_images = render.render_shape(vertices, trans_vertices, images)
+# #                     save_rendered_imgs(savefolder, k, images, predicted_images, shape_images, albedos, ops,
+# #                                        landmarks_gt, landmarks2d, landmarks3d)
+# #                 except:
+# #                     print("Error saving images and renderings... continuing")
+# #                     continue
         
             
-            if k % modulo_save_model == 0:
-                save_checkpoint(path=savefolder,
-                                epoch=k+1,
-                                losses=losses_to_plot,
-                                model=dfr)
+#             if k % modulo_save_model == 0:
+#                 save_checkpoint(path=savefolder,
+#                                 epoch=k+1,
+#                                 losses=losses_to_plot,
+#                                 model=dfr)
     
     
-    # Save final epoch renderings and checkpoints.
-    #
-    shape_images = render.render_shape(vertices, trans_vertices, images)
-    save_rendered_imgs(savefolder, k+1, images, predicted_images, shape_images, albedos, ops,
-                       landmarks_2d_gt, landmarks2d, landmarks3d)
+#     # Save final epoch renderings and checkpoints.
+#     #
+#     shape_images = render.render_shape(vertices, trans_vertices, images)
+#     save_rendered_imgs(savefolder, k+1, images, predicted_images, shape_images, albedos, ops,
+#                        landmarks_2d_gt, landmarks2d, landmarks3d)
     
     
-    save_checkpoint(path=savefolder,
-                    epoch=k+1,
-                    losses=losses_to_plot,
-                    model=dfr)
+#     save_checkpoint(path=savefolder,
+#                     epoch=k+1,
+#                     losses=losses_to_plot,
+#                     model=dfr)
         
-    print("cam: ", cam)
-    print("landmarks3d.mean: ", landmarks3d.mean())
-    print("landmarks3d.min: ", landmarks3d.min())
-    print("landmarks3d.max: ", landmarks3d.max())
+#     print("cam: ", cam)
+#     print("landmarks3d.mean: ", landmarks3d.mean())
+#     print("landmarks3d.min: ", landmarks3d.min())
+#     print("landmarks3d.max: ", landmarks3d.max())
     
         
         
         
 
-### TODO:
-### - Does not work
-###
+
 def train_distributed(args, config):
     from datetime import datetime
     now = datetime.now()
@@ -583,7 +594,7 @@ def train_distributed(args, config):
             dataset,
             num_replicas=torch.cuda.device_count(),
 #             num_replicas=4,
-#             rank = args.local_rank,
+            rank = args.local_rank,
         )
         
     
@@ -596,6 +607,18 @@ def train_distributed(args, config):
         sampler=sampler,
         drop_last=True
     )
+    
+    if args.local_rank == 0:
+        losses_to_plot = {}
+        losses_to_plot['all_loss'] = []
+        losses_to_plot['landmark_2d'] = []
+        losses_to_plot['landmark_3d'] = []
+        losses_to_plot['shape_reg'] = []
+        losses_to_plot['shape_reg'] = []
+        losses_to_plot['expression_reg'] = []
+        losses_to_plot['pose_reg'] = []
+        losses_to_plot['photometric_texture'] = []
+        losses_to_plot['texture_reg'] = []
     
     
     idx_rigid_stop = args.iter_rigid
@@ -647,19 +670,21 @@ def train_distributed(args, config):
 
             all_loss = 0.
             for key in losses.keys():
-                all_loss = all_loss + losses[key]
-#                 losses_to_plot[key].append(losses[key].item()) # Store for plotting later.
-
-
+                all_loss = all_loss + losses[key]         
             losses['all_loss'] = all_loss
-# #             losses_to_plot['all_loss'].append(losses['all_loss'].item())
 
-
+            
             optim.zero_grad()
             all_loss.backward()
             optim.step()
 
-
+            
+#             if args.local_rank == 0:
+#                 for key in losses.keys():
+#                     losses_to_plot[key].append(losses[key].item()) # Store for plotting later.
+#                 losses_to_plot['all_loss'].append(losses['all_loss'].item())  
+                    
+                    
 #             if args.local_rank == 0:
             pbar.set_description(
                 (
@@ -667,58 +692,30 @@ def train_distributed(args, config):
                 )
             )
 
+    
+            # Visualize results.
+            #
             if args.local_rank == 0:
                 if (k % modulo_save_imgs == 0):
-#                     try:
-#                         grids = {}
-#                         grids['images'] = torchvision.utils.make_grid(images.detach().cpu())
-#                         grids['landmarks_2d_gt'] = torchvision.utils.make_grid(
-#                             util.tensor_vis_landmarks(images, landmarks_2d_gt))
-#                         grids['landmarks2d'] = torchvision.utils.make_grid(
-#                             util.tensor_vis_landmarks(images, landmarks2d))
-#                         grids['landmarks3d'] = torchvision.utils.make_grid(
-#                             util.tensor_vis_landmarks(images, landmarks3d))
+                    bsize = range(0,5)
+                    save_rendered_imgs(
+                        savefolder, k,
+                        images[bsize].clone(),
+                        landmarks_2d_gt.clone(),
+                        landmarks2d.clone(),
+                        landmarks3d.clone(),
+                    )
 
-#                         grid = torch.cat(list(grids.values()), 1)
-#                         grid_image = (grid.numpy().transpose(1, 2, 0).copy() * 255)[:, :, [2, 1, 0]]
-#                         grid_image = np.minimum(np.maximum(grid_image, 0), 255).astype(np.uint8)
-#                         cv2.imwrite('{}/{}.jpg'.format(savefolder, str(k).zfill(6)), grid_image)
-#                     except:
-#                         print("Error saving images... continuing")
-#                         continue
-                    grids = {}
-                    bsize = range(0,10)
-                    grids['images'] = torchvision.utils.make_grid(images.detach().cpu()[bsize])
-                    grids['landmarks_2d_gt'] = torchvision.utils.make_grid(
-                        util.tensor_vis_landmarks(images[bsize], landmarks_2d_gt))
-                    grids['landmarks2d'] = torchvision.utils.make_grid(
-                        util.tensor_vis_landmarks(images[bsize], landmarks2d))
-                    grids['landmarks3d'] = torchvision.utils.make_grid(
-                        util.tensor_vis_landmarks(images[bsize], landmarks3d))
-
-                    grid = torch.cat(list(grids.values()), 1)
-                    grid_image = (grid.numpy().transpose(1, 2, 0).copy() * 255)[:, :, [2, 1, 0]]
-                    grid_image = np.minimum(np.maximum(grid_image, 0), 255).astype(np.uint8)
-                    cv2.imwrite('{}/{}.jpg'.format(savefolder, str(k).zfill(6)), grid_image)
-
-                
-#             if args.local_rank == 0:
-#                 if k % modulo_save_model == 0:
-#                     save_checkpoint(path=savefolder,
-#                                     epoch=k+1,
-# #                                     losses=losses_to_plot,
-#                                     losses=None,
-#                                     model=dfr)   
+            # Save current model.
+            #
+            if args.local_rank == 0:
+                if k % modulo_save_model == 0:
+                    save_checkpoint(path=savefolder,
+                                    epoch=k,
+                                    losses=losses_to_plot,
+                                    model=dfr,
+                                    optim=optim)   
     
-    
-    train_render(args, dfr, render, flame, flametex,
-                 texture_mean=texture_mean,
-                 optim=optim,
-                 savefolder=savefolder,
-                 dataloader=loader)
-        
-        
-def train_render(args, dfr, render, flame, flametex, texture_mean, optim, savefolder, dataloader):
 #     # Save final epoch for rigid fitting.
 #     #
 #     if k > 0:
@@ -726,6 +723,24 @@ def train_render(args, dfr, render, flame, flametex, texture_mean, optim, savefo
 #                         epoch=k+1,
 #                         losses=losses_to_plot,
 #                         model=dfr)
+    
+    
+    # Add in the rendering
+    #
+    train_render(args, dfr, render, flame, flametex,
+                 texture_mean=texture_mean,
+                 optim=optim,
+                 savefolder=savefolder,
+                 sampler=sampler,
+                 dataloader=loader,
+                 losses_to_plot=losses_to_plot if args.local_rank == 0 else None)
+        
+        
+        
+def train_render(args, dfr, render, flame, flametex,
+                 texture_mean, optim, savefolder, 
+                 sampler, dataloader, losses_to_plot):
+
     
     
     loss_mse = nn.MSELoss()
@@ -739,6 +754,9 @@ def train_render(args, dfr, render, flame, flametex, texture_mean, optim, savefo
     #
     pbar = tqdm(range(idx_rigid_stop, args.iter), dynamic_ncols=True, smoothing=0.01)
     for k in pbar:
+        if args.distributed:
+            sampler.set_epoch(k)
+            
         for example in dataloader:
             latents = example['latents'].cuda(args.local_rank)
             landmarks_2d_gt = example['landmarks_2d_gt'].cuda(args.local_rank)
@@ -747,7 +765,6 @@ def train_render(args, dfr, render, flame, flametex, texture_mean, optim, savefo
             image_masks = example['image_masks'].cuda(args.local_rank)
 
 
-#             shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
             shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
             vertices, landmarks2d, landmarks3d = flame(shape_params=shape,
                                                        expression_params=expression,
@@ -763,16 +780,8 @@ def train_render(args, dfr, render, flame, flametex, texture_mean, optim, savefo
 
 
             losses = {}
-            
-#             if k < 250:
-#                 losses['landmark_2d'] = util.l2_distance(landmarks2d[:, 17:, :2],
-#                                                       landmarks_2d_gt[:, 17:, :2]) * 2.0 #config.w_lmks
-#             else:
-#                 losses['landmark_2d'] = util.l2_distance(landmarks2d[:, :, :2],
-#                                                       landmarks_2d_gt[:, :, :2]) * 2.0
             losses['landmark_2d'] = util.l2_distance(landmarks2d[:, :, :2],
                                                       landmarks_2d_gt[:, :, :2]) * 2.0
-    
             losses['landmark_3d'] = util.l2_distance(landmarks3d[:, :, :2],
                                                       landmarks_3d_gt[:, :, :2]) * 1.0
             losses['shape_reg'] = (torch.sum(shape ** 2) / 2) * config.w_shape_reg  # *1e-4
@@ -782,7 +791,10 @@ def train_render(args, dfr, render, flame, flametex, texture_mean, optim, savefo
 
             ## render
             albedos = flametex(tex) / 255.
-            losses['texture_reg'] = loss_mse(albedos, texture_mean.repeat(args.batch_size, 1, 1, 1)) #* 1e-3 # Regularize learned texture.
+            
+            # Regularize learned texture.
+            #
+            losses['texture_reg'] = loss_mse(albedos, texture_mean.repeat(args.batch_size, 1, 1, 1)) #* 1e-3 
             ops = render(vertices, trans_vertices, albedos, lights)
             predicted_images = ops['images']
             losses['photometric_texture'] = (image_masks * (predicted_images - images).abs()).mean() \
@@ -792,10 +804,7 @@ def train_render(args, dfr, render, flame, flametex, texture_mean, optim, savefo
             all_loss = 0.
             for key in losses.keys():
                 all_loss = all_loss + losses[key]
-#                 losses_to_plot[key].append(losses[key].item()) # Store for plotting later.
-
             losses['all_loss'] = all_loss
-#             losses_to_plot['all_loss'].append(losses['all_loss'].item())
 
 
             optim.zero_grad()
@@ -804,76 +813,78 @@ def train_render(args, dfr, render, flame, flametex, texture_mean, optim, savefo
 #             scheduler.step(all_loss)
 
 
+            # Store for plotting later.
+            #
+            if (args.local_rank == 0) and (losses_to_plot is not None):
+                for key in losses.keys():
+                    losses_to_plot[key].append(losses[key].item()) 
+                losses_to_plot['all_loss'].append(losses['all_loss'].item()) 
+                
+
             pbar.set_description(
                 (
-                    f"total: {losses['all_loss']:.4f}; lmk_2d: {losses['landmark_2d']:.4f}; "
-                    f"lmk_3d: {losses['landmark_3d']:.4f}; "
-                    f"shape: {losses['shape_reg']:.4f}; express: {losses['expression_reg']:.4f}; "
+                    f"all: {losses['all_loss']:.4f}; 2d: {losses['landmark_2d']:.4f}; "
+                    f"3d: {losses['landmark_3d']:.4f}; "
+                    f"shape: {losses['shape_reg']:.4f}; expr: {losses['expression_reg']:.4f}; "
                     f"photo: {losses['photometric_texture']:.4f}; "
                 )
             )
 
 
-            # visualize
-            if k % modulo_save_imgs == 0:
-                bsize = range(0,10)
-                shape_images = render.render_shape(vertices, trans_vertices, images)
-                save_rendered_imgs(savefolder, k, images[bsize], predicted_images[bsize], shape_images[bsize],
-                                   albedos[bsize], ops['albedo_images'].detach().cpu()[bsize],
-                                   landmarks_2d_gt, landmarks2d, landmarks3d)
-#                 try:
-# #                     grids = {}
-# #     #                 visind = range(bz)  # [0]
-# #                     grids['images'] = torchvision.utils.make_grid(images).detach().cpu()
-# #                     grids['landmarks_gt'] = torchvision.utils.make_grid(
-# #                         util.tensor_vis_landmarks(images.clone().detach(), landmarks_gt))
-# #                     grids['landmarks2d'] = torchvision.utils.make_grid(
-# #                         util.tensor_vis_landmarks(images, landmarks2d))
-# #                     grids['landmarks3d'] = torchvision.utils.make_grid(
-# #                         util.tensor_vis_landmarks(images, landmarks3d))
-# #                     grids['albedoimage'] = torchvision.utils.make_grid(
-# #                         (ops['albedo_images']).detach().cpu())
-# #                     grids['render'] = torchvision.utils.make_grid(predicted_images.detach().float().cpu())
-# #                     shape_images = render.render_shape(vertices, trans_vertices, images)
-# #                     grids['shape'] = torchvision.utils.make_grid(
-# #                         F.interpolate(shape_images, [224, 224])).detach().float().cpu()
+            # visualize results
+            #
+            if args.local_rank == 0:
+                if k % modulo_save_imgs == 0:
+                    bsize = range(0,5)
+                    shape_images = render.render_shape(vertices, trans_vertices, images)
+                    save_rendered_imgs(
+                        savefolder, k,
+                        images[bsize].clone(),
+                        landmarks_2d_gt.clone(),
+                        landmarks2d.clone(),
+                        landmarks3d.clone(),
+                        predicted_images[bsize].detach().cpu().float().clone(),
+                        shape_images[bsize].clone(),
+                        albedos[bsize].clone(),
+                        ops['albedo_images'].detach().cpu().clone()[bsize],                        
+                    )
 
-
-# #                     grids['tex'] = torchvision.utils.make_grid(F.interpolate(albedos, [224, 224])).detach().cpu()
-# #                     grid = torch.cat(list(grids.values()), 1)
-# #                     grid_image = (grid.numpy().transpose(1, 2, 0).copy() * 255)[:, :, [2, 1, 0]]
-# #                     grid_image = np.minimum(np.maximum(grid_image, 0), 255).astype(np.uint8)
-
-# #                     cv2.imwrite('{}/{}.jpg'.format(savefolder, str(k).zfill(6)), grid_image) 
-
-#                     shape_images = render.render_shape(vertices, trans_vertices, images)
-#                     save_rendered_imgs(savefolder, k, images, predicted_images, shape_images, albedos, ops,
-#                                        landmarks_gt, landmarks2d, landmarks3d)
-#                 except:
-#                     print("Error saving images and renderings... continuing")
-#                     continue
         
             
-#             if k % modulo_save_model == 0:
-#                 save_checkpoint(path=savefolder,
-#                                 epoch=k+1,
-#                                 losses=losses_to_plot,
-#                                 model=dfr)
+            if args.local_rank == 0:
+                if k % modulo_save_model == 0:
+                    save_checkpoint(path=savefolder,
+                                    epoch=k,
+                                    losses=losses_to_plot,
+                                    model=dfr,
+                                    optim=optim)
     
     
     # Save final epoch renderings and checkpoints.
     #
-    bsize = range(0,10)
-    shape_images = render.render_shape(vertices, trans_vertices, images)
-    save_rendered_imgs(savefolder, k, images[bsize], predicted_images[bsize], shape_images[bsize],
-                       albedos[bsize], ops['albedo_images'].detach().cpu()[bsize],
-                       landmarks_2d_gt, landmarks2d, landmarks3d)
+    if args.local_rank == 0:
+        bsize = range(0,5)
+        shape_images = render.render_shape(vertices, trans_vertices, images)
+        save_rendered_imgs(
+            savefolder, k,
+            images[bsize].clone(),
+            landmarks_2d_gt.clone(),
+            landmarks2d.clone(),
+            landmarks3d.clone(),
+            predicted_images[bsize].detach().cpu().float().clone(),
+            shape_images[bsize].clone(),
+            albedos[bsize].clone(),
+            ops['albedo_images'].detach().cpu().clone()[bsize],                        
+        )
+
+        
+    if args.local_rank == 0:
+        save_checkpoint(path=savefolder,
+                        epoch=k,
+                        losses=losses_to_plot,
+                        model=dfr,
+                        optim=optim)
     
-    
-#     save_checkpoint(path=savefolder,
-#                     epoch=k+1,
-#                     losses=losses_to_plot,
-#                     model=dfr)
     
     if args.local_rank == 0:
         print("cam: ", cam)
@@ -933,13 +944,6 @@ if __name__ == "__main__":
 # #         except RuntimeError:
 # #             pass
         
-#         import multiprocessing as mp
-#         mp.set_start_method('spawn')
-#         q = mp.Queue()
-#         p = mp.Process(train_distributed, args=(args, config))
-#         p.start()
-#         print(q.get())
-#         p.join()
 
         train_distributed(args, config)
         dist.destroy_process_group()
@@ -987,4 +991,4 @@ if __name__ == "__main__":
 #
 # Distributed:
 #
-# python -m torch.distributed.launch --nproc_per_node=4 --nnodes=1 train_dfr_regressor.py --iter=10 --iter_rigid=10 --iter_save_img=1 --local_rank=0 --batch_size=4 --distributed --flame_data=/home/ec2-user/SageMaker/pretrained_models --train_data=/home/ec2-user/SageMaker/train_data_trunc0p2
+# python -m torch.distributed.launch --nproc_per_node=4 --nnodes=1 train_dfr_regressor.py --iter=10 --iter_rigid=5 --iter_save_img=1 --local_rank=0 --batch_size=32 --flame_data=/home/ec2-user/SageMaker/pretrained_models --train_data=/home/ec2-user/SageMaker/train_data_trunc02 --distributed --workers=0
