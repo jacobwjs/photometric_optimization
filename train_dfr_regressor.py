@@ -3,6 +3,7 @@ import argparse
 
 import os, sys
 import numpy as np
+import glob
 
 
 import cv2
@@ -133,18 +134,29 @@ def sample_data(loader):
         for batch in loader:
             yield batch
             
+            
+def collate_fn(batch):
+    batch = list(filter(lambda x: x is not None, batch))
+    return torch.utils.data.dataloader.default_collate(batch)
+
              
 class DatasetDFR(data.Dataset):
     def __init__(self, path_to_dir):
         self.path = path_to_dir
+        self.files = glob.glob1(self.path, '*.pkl')
         
     def __len__(self):
-        import glob
         return len(glob.glob1(self.path, '*.pkl'))
     
     def __getitem__(self, index):
         filename = str(index).zfill(6) + '.pkl'
-        x = torch.load(f'{self.path}/{filename}')
+#         filename = str(index).ljust(6, '0') + '.pkl'
+#         filename = self.files[index]
+        try:
+            x = torch.load(f'{self.path}/{filename}')
+        except:
+            return None
+        
         return x
     
     
@@ -174,6 +186,10 @@ def save_rendered_imgs(savefolder,
                        shape_images=None,
                        albedos=None,
                        albedo_images=None):
+
+    if not os.path.exists(savefolder):
+        os.makedirs(savefolder, exist_ok=True)
+    
     grids = {}
     grids['images'] = torchvision.utils.make_grid(images).detach().cpu()
     grids['landmarks_gt'] = torchvision.utils.make_grid(
@@ -261,7 +277,7 @@ def train(args, config, loader, dfr, flame, flametex, render, tex_mean, device):
     
     idx_rigid_stop = args.iter_rigid
     modulo_save_imgs = args.iter_save_img
-    modulo_save_model = args.iter_save_chkpt
+    modulo_save_model = args.iter_save_ckpt
     
     
     pbar = tqdm(range(0, idx_rigid_stop), dynamic_ncols=True, smoothing=0.01)
@@ -492,33 +508,29 @@ def train(args, config, loader, dfr, flame, flametex, render, tex_mean, device):
 #     print("landmarks3d.min: ", landmarks3d.min())
 #     print("landmarks3d.max: ", landmarks3d.max())
     
-        
-        
-        
-
-
-def train_distributed(args, config):
-    from datetime import datetime
-    now = datetime.now()
-    dt_string = now.strftime("%d-%m-%Y_%H.%M.%S")     # dd/mm/YY H:M:S
-    savefolder = os.path.sep.join(['./test_results', f'{dt_string}'])
-    if not os.path.exists(savefolder):
-        os.makedirs(savefolder, exist_ok=True)
     
     
-    dist.init_process_group(                                   
-        backend='nccl',                                         
-        init_method='env://'
-    )  
+
+
+def train_distributed(args, config, savefolder, train_dir, dfr=None):
+    
+    if dfr is None:
+        dist.init_process_group(                                   
+            backend='nccl',                                         
+            init_method='env://'
+        )  
+    
     
     args.local_rank = torch.distributed.get_rank()
+    
     
     # this is the total # of GPUs across all nodes
     # if using 2 nodes with 4 GPUs each, world size is 8
     args.world_size = torch.distributed.get_world_size()
     print("### global rank of curr node: {} of {}".format(torch.distributed.get_rank(),
                                                          torch.distributed.get_world_size()))
-    
+    if args.local_rank == 0:
+        print("training on ", train_dir)
     
     # For multiprocessing distributed, DistributedDataParallel constructor
     # should always set the single device scope, otherwise,
@@ -527,7 +539,14 @@ def train_distributed(args, config):
     torch.cuda.set_device(args.local_rank)
 
     
-    dfr = DFRParamRegressor(config)
+    
+    if dfr is None:
+        # Have not trained on any data (i.e. first pass in).
+        # Need to create.
+        #
+        print("creating DFR model...")
+        dfr = DFRParamRegressor(config)
+        print("done")
     if args.ckpt is not None:
         dfr.load_state_dict(torch.load(args.ckpt)['dfr'], strict=False)
         dfr.train();
@@ -584,7 +603,21 @@ def train_distributed(args, config):
     )
     
     
-    dataset = DatasetDFR(args.train_data)
+    # To help convergence we train on multiple stages of data generated 
+    # with different truncation values. The idea being it is easier to
+    # learn on many examples that are very similar (low truncation value e.g. 0.2)
+    # and slowly incorporate more challenging and diverse examples 
+    # (high truncation, e.g. 0.7).
+    # 
+    
+    if args.local_rank == 0:
+        print("Training on ", train_dir, "...")
+
+    dataset = None
+#     path= '/home/ec2-user/SageMaker/train_data/trunc02'
+#     dataset = DatasetDFR(path)
+#     print("train_dir: ", train_dir)
+    dataset = DatasetDFR(train_dir)
     # makes sure that each process gets a different slice of the training data
     # during distributed training.
     #
@@ -593,21 +626,22 @@ def train_distributed(args, config):
         sampler = torch.utils.data.distributed.DistributedSampler(
             dataset,
             num_replicas=torch.cuda.device_count(),
-#             num_replicas=4,
+# #             num_replicas=4,
             rank = args.local_rank,
         )
-        
-    
+
+#     loader = None
     loader = torch.utils.data.DataLoader(
         dataset=dataset,
         batch_size=batch_size,
         shuffle=(sampler is None),
         num_workers=args.workers,
-#         pin_memory=True,
+        collate_fn=collate_fn,
+        pin_memory=True,
         sampler=sampler,
         drop_last=True
     )
-    
+
     if args.local_rank == 0:
         losses_to_plot = {}
         losses_to_plot['all_loss'] = []
@@ -619,139 +653,194 @@ def train_distributed(args, config):
         losses_to_plot['pose_reg'] = []
         losses_to_plot['photometric_texture'] = []
         losses_to_plot['texture_reg'] = []
-    
-    
+
+
     idx_rigid_stop = args.iter_rigid
     modulo_save_imgs = args.iter_save_img
-    modulo_save_model = args.iter_save_chkpt
+    modulo_save_model = args.iter_save_ckpt
+    if args.save_batch_size < args.batch_size:
+        save_batch_size = args.save_batch_size 
+    else:
+        save_batch_size = args.batch_size
     
+    
+    path_save = f'{savefolder}/{os.path.basename(train_dir)}'
+
     # Start optimization
     # -----------------------------
-    pbar = tqdm(range(0, idx_rigid_stop), dynamic_ncols=True, smoothing=0.01)
-#     pbar = range(0, idx_rigid_stop)
-    k = 0
-    for k in pbar:
-        if args.distributed:
-            sampler.set_epoch(k)
-        
-        
-        for example in loader:
-            latents = example['latents'].cuda(args.local_rank)
-            landmarks_2d_gt = example['landmarks_2d_gt'].cuda(args.local_rank)
-            images = example['images'].cuda(args.local_rank)
-            image_masks = example['image_masks'].cuda(args.local_rank)
-#             print("2 step in rank: ", args.local_rank, flush=True)
-#             print(latents.shape)
-#             print(landmarks_2d_gt.shape)
-#             print(images.shape)
-#             print(image_masks.shape)
-
-
-            shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
-            vertices, landmarks2d, landmarks3d = flame(shape_params=shape,
-                                                       expression_params=expression,
-                                                       pose_params=pose)
-
-
-            trans_vertices = util.batch_orth_proj(vertices, cam); 
-            trans_vertices[..., 1:] = - trans_vertices[..., 1:]
-            landmarks2d = util.batch_orth_proj(landmarks2d, cam);
-            landmarks2d[..., 1:] = - landmarks2d[..., 1:]
-            landmarks3d = util.batch_orth_proj(landmarks3d, cam);
-            landmarks3d[..., 1:] = - landmarks3d[..., 1:]
-
-
-            losses = {}
-            losses['landmark_2d'] = loss_l2(
-                landmarks2d[:, 17:, :2],
-                landmarks_2d_gt[:, 17:, :2]
-            ) * config.w_lmks
-
-
-            all_loss = 0.
-            for key in losses.keys():
-                all_loss = all_loss + losses[key]         
-            losses['all_loss'] = all_loss
-
-            
-            optim.zero_grad()
-            all_loss.backward()
-            optim.step()
-
-            
-#             if args.local_rank == 0:
-#                 for key in losses.keys():
-#                     losses_to_plot[key].append(losses[key].item()) # Store for plotting later.
-#                 losses_to_plot['all_loss'].append(losses['all_loss'].item())  
-                    
-                    
-#             if args.local_rank == 0:
-            pbar.set_description(
-                (
-                    f"total: {losses['all_loss']:.4f}; landmark_2d: {losses['landmark_2d']:.4f}; "
-                )
-            )
-
+    #
     
-            # Visualize results.
-            #
-            if args.local_rank == 0:
-                if (k % modulo_save_imgs == 0):
-                    bsize = range(0,5)
-                    save_rendered_imgs(
-                        savefolder, k,
-                        images[bsize].clone(),
-                        landmarks_2d_gt.clone(),
-                        landmarks2d.clone(),
-                        landmarks3d.clone(),
+    # Check if we start with "rigid training" (just facial landmarks).
+    #
+    if idx_rigid_stop > 0:
+        k = 0
+        vertices = None
+        images = None
+        trans_vertices = None
+        landmarks2d = None
+        landmarks3d = None
+        pbar = tqdm(range(0, idx_rigid_stop), dynamic_ncols=True, smoothing=0.01)
+        for k in pbar:
+            if args.distributed:
+                sampler.set_epoch(k)
+
+    #         print("args.local_rank: ", args.local_rank)
+            for example in loader:
+                latents = example['latents'].cuda(args.local_rank)
+                landmarks_2d_gt = example['landmarks_2d_gt'].cuda(args.local_rank)
+                images = example['images'].cuda(args.local_rank)
+                image_masks = example['image_masks'].cuda(args.local_rank)
+
+    #             if args.local_rank == 0:
+    #                 print("2 step in rank: ", args.local_rank, flush=True)
+    #                 print(latents.shape)
+    #                 print(landmarks_2d_gt.shape)
+    #                 print(images.shape)
+    #                 print(image_masks.shape)
+
+
+                shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
+                vertices, landmarks2d, landmarks3d = flame(shape_params=shape,
+                                                           expression_params=expression,
+                                                           pose_params=pose)
+
+
+                trans_vertices = util.batch_orth_proj(vertices, cam); 
+                trans_vertices[..., 1:] = - trans_vertices[..., 1:]
+                landmarks2d = util.batch_orth_proj(landmarks2d, cam);
+                landmarks2d[..., 1:] = - landmarks2d[..., 1:]
+                landmarks3d = util.batch_orth_proj(landmarks3d, cam);
+                landmarks3d[..., 1:] = - landmarks3d[..., 1:]
+
+
+                losses = {}
+                losses['landmark_2d'] = loss_l2(
+                    landmarks2d[:, 17:, :2],
+                    landmarks_2d_gt[:, 17:, :2]
+                ) * config.w_lmks
+
+
+                all_loss = 0.
+                for key in losses.keys():
+                    all_loss = all_loss + losses[key]         
+                losses['all_loss'] = all_loss
+
+
+                optim.zero_grad()
+                all_loss.backward()
+                optim.step()
+
+
+                if args.local_rank == 0:
+                    for key in losses.keys():
+                        losses_to_plot[key].append(losses[key].item()) # Store for plotting later.
+                    losses_to_plot['all_loss'].append(losses['all_loss'].item())  
+
+
+    #             if args.local_rank == 0:
+                pbar.set_description(
+                    (
+                        f"total: {losses['all_loss']:.4f}; landmark_2d: {losses['landmark_2d']:.4f}; "
                     )
+                )
 
-            # Save current model.
-            #
-            if args.local_rank == 0:
-                if k % modulo_save_model == 0:
-                    save_checkpoint(path=savefolder,
-                                    epoch=k,
-                                    losses=losses_to_plot,
-                                    model=dfr,
-                                    optim=optim)   
-    
-#     # Save final epoch for rigid fitting.
-#     #
-#     if k > 0:
-#         save_checkpoint(path=savefolder,
-#                         epoch=k+1,
-#                         losses=losses_to_plot,
-#                         model=dfr)
-    
-    
+        
+                # Visualize results.
+                #
+                if args.local_rank == 0:
+                    if (k % modulo_save_imgs == 0):
+    #                     print("saving images...", path_save)
+                        bsize = range(0, save_batch_size)
+                        save_rendered_imgs(
+                            path_save,
+                            k,
+                            images[bsize].clone(),
+                            landmarks_2d_gt.clone(),
+                            landmarks2d.clone(),
+                            landmarks3d.clone(),
+                        )
+
+
+                # Save current model.
+                #
+                if args.local_rank == 0:
+                    if k % modulo_save_model == 0:
+                        save_checkpoint(
+                            path=path_save,
+                            epoch=k,
+                            losses=losses_to_plot,
+                            model=dfr,
+                            optim=optim)   
+
+
+        dist.barrier()
+                        
+        # Save final epoch for rigid fitting.
+        #
+        if args.local_rank == 0:
+            save_checkpoint(path=savefolder,
+                        epoch=k,
+                        losses=losses_to_plot,
+                        model=dfr,
+                        optim=optim)
+
+
+        if args.local_rank == 0:
+            print("DONE: rigid training...") 
+
+            
+        
+
+        
+        
     # Add in the rendering
     #
+    
     train_render(args, dfr, render, flame, flametex,
                  texture_mean=texture_mean,
                  optim=optim,
-                 savefolder=savefolder,
+                 savefolder=path_save,
                  sampler=sampler,
                  dataloader=loader,
                  losses_to_plot=losses_to_plot if args.local_rank == 0 else None)
-        
-        
+    
+    
+    return dfr
+
+
         
 def train_render(args, dfr, render, flame, flametex,
                  texture_mean, optim, savefolder, 
                  sampler, dataloader, losses_to_plot):
-
     
     
     loss_mse = nn.MSELoss()
     
-    
+    ### TODO:
+    ### - make below a return value(s) from a function call
+    ###   so it does not need to be udpated in multiple functions
+    ###   by hand.
+    ###
     idx_rigid_stop = args.iter_rigid
     modulo_save_imgs = args.iter_save_img
-    modulo_save_model = args.iter_save_chkpt
+    modulo_save_model = args.iter_save_ckpt
+    if args.save_batch_size < args.batch_size:
+        save_batch_size = args.save_batch_size 
+    else:
+        save_batch_size = args.batch_size
     
     # Second stage training. Adding in photometric loss.
     #
+    k = 0
+    vertices = None
+#     trans_vertices = None
+#     images = None
+#     landmarks2d = None
+#     landmarks3d = None
+#     predicted_images = None,
+#     shape_images = None
+#     albedos = None
+#     ops = None
     pbar = tqdm(range(idx_rigid_stop, args.iter), dynamic_ncols=True, smoothing=0.01)
     for k in pbar:
         if args.distributed:
@@ -781,7 +870,7 @@ def train_render(args, dfr, render, flame, flametex,
 
             losses = {}
             losses['landmark_2d'] = util.l2_distance(landmarks2d[:, :, :2],
-                                                      landmarks_2d_gt[:, :, :2]) * 2.0
+                                                      landmarks_2d_gt[:, :, :2]) * 1.0
             losses['landmark_3d'] = util.l2_distance(landmarks3d[:, :, :2],
                                                       landmarks_3d_gt[:, :, :2]) * 1.0
             losses['shape_reg'] = (torch.sum(shape ** 2) / 2) * config.w_shape_reg  # *1e-4
@@ -794,7 +883,7 @@ def train_render(args, dfr, render, flame, flametex,
             
             # Regularize learned texture.
             #
-            losses['texture_reg'] = loss_mse(albedos, texture_mean.repeat(args.batch_size, 1, 1, 1)) #* 1e-3 
+            losses['texture_reg'] = loss_mse(albedos, texture_mean.repeat(args.batch_size, 1, 1, 1)) 
             ops = render(vertices, trans_vertices, albedos, lights)
             predicted_images = ops['images']
             losses['photometric_texture'] = (image_masks * (predicted_images - images).abs()).mean() \
@@ -835,10 +924,11 @@ def train_render(args, dfr, render, flame, flametex,
             #
             if args.local_rank == 0:
                 if k % modulo_save_imgs == 0:
-                    bsize = range(0,5)
+                    bsize = range(0, save_batch_size)
                     shape_images = render.render_shape(vertices, trans_vertices, images)
                     save_rendered_imgs(
-                        savefolder, k,
+                        savefolder,
+                        k,
                         images[bsize].clone(),
                         landmarks_2d_gt.clone(),
                         landmarks2d.clone(),
@@ -848,10 +938,7 @@ def train_render(args, dfr, render, flame, flametex,
                         albedos[bsize].clone(),
                         ops['albedo_images'].detach().cpu().clone()[bsize],                        
                     )
-
-        
-            
-            if args.local_rank == 0:
+                    
                 if k % modulo_save_model == 0:
                     save_checkpoint(path=savefolder,
                                     epoch=k,
@@ -860,24 +947,26 @@ def train_render(args, dfr, render, flame, flametex,
                                     optim=optim)
     
     
-    # Save final epoch renderings and checkpoints.
-    #
-    if args.local_rank == 0:
-        bsize = range(0,5)
-        shape_images = render.render_shape(vertices, trans_vertices, images)
-        save_rendered_imgs(
-            savefolder, k,
-            images[bsize].clone(),
-            landmarks_2d_gt.clone(),
-            landmarks2d.clone(),
-            landmarks3d.clone(),
-            predicted_images[bsize].detach().cpu().float().clone(),
-            shape_images[bsize].clone(),
-            albedos[bsize].clone(),
-            ops['albedo_images'].detach().cpu().clone()[bsize],                        
-        )
+#     if args.local_rank == 0:
+#         if (k+1) % args.iter == 0:
+#             bsize = range(0, save_batch_size)
+#             shape_images = render.render_shape(vertices, trans_vertices, images)
+#             save_rendered_imgs(
+#                 savefolder,
+#                 k,
+#                 images[bsize].clone(),
+#                 landmarks_2d_gt.clone(),
+#                 landmarks2d.clone(),
+#                 landmarks3d.clone(),
+#                 predicted_images[bsize].detach().cpu().float().clone(),
+#                 shape_images[bsize].clone(),
+#                 albedos[bsize].clone(),
+#                 ops['albedo_images'].detach().cpu().clone()[bsize],                        
+#             )
 
-        
+    dist.barrier()
+    
+    
     if args.local_rank == 0:
         save_checkpoint(path=savefolder,
                         epoch=k,
@@ -885,12 +974,42 @@ def train_render(args, dfr, render, flame, flametex,
                         model=dfr,
                         optim=optim)
     
-    
     if args.local_rank == 0:
-        print("cam: ", cam)
-        print("landmarks3d.mean: ", landmarks3d.mean())
-        print("landmarks3d.min: ", landmarks3d.min())
-        print("landmarks3d.max: ", landmarks3d.max())
+        print("DONE: render training...")
+
+    
+#     # Save final epoch renderings and checkpoints.
+#     #
+#     if args.local_rank == 0:
+#         bsize = range(0, save_batch_size)
+#         shape_images = render.render_shape(vertices, trans_vertices, images)
+#         save_rendered_imgs(
+#             savefolder,
+#             k,
+#             images[bsize].clone(),
+#             landmarks_2d_gt.clone(),
+#             landmarks2d.clone(),
+#             landmarks3d.clone(),
+#             predicted_images[bsize].detach().cpu().float().clone(),
+#             shape_images[bsize].clone(),
+#             albedos[bsize].clone(),
+#             ops['albedo_images'].detach().cpu().clone()[bsize],                        
+#         )
+
+        
+#     if args.local_rank == 0:
+#         save_checkpoint(path=savefolder,
+#                         epoch=k,
+#                         losses=losses_to_plot,
+#                         model=dfr,
+#                         optim=optim)
+    
+    
+#     if args.local_rank == 0:
+#         print("cam: ", cam)
+#         print("landmarks3d.mean: ", landmarks3d.mean())
+#         print("landmarks3d.min: ", landmarks3d.min())
+#         print("landmarks3d.max: ", landmarks3d.max())
     
     
     
@@ -908,21 +1027,23 @@ if __name__ == "__main__":
     parser.add_argument("--iter_save_img", type=int, 
                         help="modulo epoch value to save output images from model during training",
                         default=50)
-    parser.add_argument("--iter_save_chkpt", type=int,
+    parser.add_argument("--iter_save_ckpt", type=int,
                         help="modulo epoch value to checkpoint model to disk during training",
                         default=100)
     parser.add_argument("--workers", type=int, help="number of dataloader workers", default=4)
-#     parser.add_argument("--size", type=int, default=256)d
+    parser.add_argument("--save_batch_size", type=int,
+                        help="number of images to save to disk when triggered", default=8)
     parser.add_argument("--ckpt", type=str, default=None)
     parser.add_argument("--lr", type=float, default=0.002)
     parser.add_argument("--local_rank", type=int, default=0)
     parser.add_argument("--batch_size", type=int, default=10)
     parser.add_argument("--distributed", action='store_true')
     parser.add_argument("--flame_data", type=str, default=None)
-    parser.add_argument("--train_data", type=str, default='/home/jupyter/training_data_dfr')
+    parser.add_argument("--train_data", type=str, default='/home/jupyter/train_data')
 
     args = parser.parse_args()
     assert args.iter >= args.iter_rigid
+    
     
     
     device = 'cuda'
@@ -944,8 +1065,26 @@ if __name__ == "__main__":
 # #         except RuntimeError:
 # #             pass
         
+        # Create unique directory to save results.
+        #
+        from datetime import datetime
+        now = datetime.now()
+        dt_string = now.strftime("%d-%m-%Y_%H.%M.%S")     # dd/mm/YY H:M:S
+        savefolder = os.path.sep.join(['./test_results', f'{dt_string}'])
+        if not os.path.exists(savefolder):
+            os.makedirs(savefolder, exist_ok=True)
 
-        train_distributed(args, config)
+        # Sort the directories based on truncation value.
+        # 
+        truncation_dirs = glob.glob(args.train_data + "/*")
+        truncation_dirs.sort(key=lambda x: int(''.join(filter(str.isdigit, x))))
+        print("top: ", args.train_data)
+        print("training dirs: ", truncation_dirs)
+        
+        dfr = None
+        for trunc_dir in truncation_dirs:
+            dfr = train_distributed(args, config, savefolder, train_dir=trunc_dir, dfr=dfr)
+
         dist.destroy_process_group()
     else:
         print("NON-distributed training...")
@@ -987,8 +1126,12 @@ if __name__ == "__main__":
         
 # Example commandline run:
 #
-# CUDA_VISIBLE_DEVICES=2,3 python train_dfr_regressor.py --iter=500 --iter_rigid=0 --iter_save_img=10 --iter_save_chkpt=50 --batch_size=50
+# CUDA_VISIBLE_DEVICES=2,3 python train_dfr_regressor.py --iter=500 --iter_rigid=0 --iter_save_img=10 --iter_save_ckpt=50 --batch_size=50
 #
 # Distributed:
+# - example with 2 GPUs on 1 node.
 #
-# python -m torch.distributed.launch --nproc_per_node=4 --nnodes=1 train_dfr_regressor.py --iter=10 --iter_rigid=5 --iter_save_img=1 --local_rank=0 --batch_size=32 --flame_data=/home/ec2-user/SageMaker/pretrained_models --train_data=/home/ec2-user/SageMaker/train_data_trunc02 --distributed --workers=0
+# CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node=4 --nnodes=1 train_dfr_regressor.py --iter=100 --iter_rigid=0 --iter_save_img=10 --iter_save_ckpt=10 --local_rank=0 --batch_size=32 --flame_data=/home/ec2-user/SageMaker/pretrained_models --train_data=/home/ec2-user/SageMaker/train_data --distributed --workers=4
+
+# Debug:
+# You can see what all the threads are doing “sudo gdb -p … thread apply all bt”

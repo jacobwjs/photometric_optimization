@@ -29,12 +29,14 @@ def load_facesegment(base_path, device):
     '''    
     sys.path.append(f'{base_path}')
     from Face_Seg.models import LinkNet34
+    
+    print("Loading face segmentation to device: ", device)
 
     path_faceseg_repo = f'{base_path}/Face_Seg'
     face_seg = LinkNet34();
     face_seg.load_state_dict(torch.load(f'{path_faceseg_repo}/linknet.pth'));
     face_seg.eval();
-    face_seg.to(device);
+    face_seg = face_seg.to(device);
     return face_seg
 
 
@@ -44,9 +46,7 @@ def load_generator(base_path, device):
 #     from model import Generator
     from stylegan2_pytorch.model import Generator
     
-    # Create a directory and mount bucket.
-    #
-#     print("Bucket name: ", bucket_name)
+    print("Loading generator to device: ", device)
 
     # Structure of bucket in S3.
     #
@@ -69,7 +69,6 @@ def load_generator(base_path, device):
     
     # Initialize generator 
     #
-    device = 'cuda'
     checkpoint_sg2 = path_to_weights_ffhq_sg2
     print("Loading weights... ", checkpoint_sg2)
     g_ema = Generator(1024, 512, 8) # (resolution, latent_dim, mapping_layers)
@@ -120,13 +119,15 @@ def load_3ddfa(args, base_path):
 
     
     
-def generate_train_data(args, g_ema,
+def generate_train_data(args,
+                        g_ema,
                         seg_model,
                         lmk_model2d,
                         lmk_model3d,
+                        device,
                         dims=(224, 224),
+                        mean_2d_landmark=None,
                         **kwargs):
-    
     
     
     # Get SG2 generated image that we will learn the rendering from.
@@ -136,6 +137,7 @@ def generate_train_data(args, g_ema,
     # Generate data in batches, otherwise we quickly exhaust RAM.
     #
     dims = (224, 224)
+    offset = 0
     batches = args.size // args.batch_size
     pbar = tqdm(range(0, batches), dynamic_ncols=True, smoothing=0.01)
     for i in pbar:
@@ -157,18 +159,36 @@ def generate_train_data(args, g_ema,
             # Form masks that segment out only the face, as well as getting
             # 2d and 3d landmarks to be used as "ground truth".
             #
-            image_masks, landmarks_2d_gt, landmarks_3d_gt = get_masks_landmarks(args,
-                                                                                images,
-                                                                                seg_model,
-                                                                                lmk_model2d,
-                                                                                lmk_model3d)
-    
+            try:
+                image_masks, landmarks_2d_gt, landmarks_3d_gt = get_masks_landmarks(
+                    args,
+                    images,
+                    seg_model,
+                    lmk_model2d,
+                    lmk_model3d,
+                    device
+                )
+            except:
+                print("ERROR: failed to compute landmarks...")
+                continue
 
+                
             for j, (latent, landmark_2d, landmark_3d, image, mask) in enumerate(zip(batch_latents,
                                                                     landmarks_2d_gt,
                                                                     landmarks_3d_gt,
                                                                     images,
                                                                     image_masks)):
+                
+                # Ensure we found a valid landmark from the image.
+                # Sometimes non-sense is returned with truncation
+                # value on SG2 generator is high.
+                #
+                if mean_2d_landmark is not None:
+                    dist = (landmark_2d - mean_2d_landmark).abs().mean()
+                    if dist > 0.3:
+#                         print("Skipping: found invalid 2d landmark...")
+                        print("Mean landmark difference larger than threshold")
+                    
                 example = None
                 example = {
                     'latents': latent.detach().cpu(),
@@ -179,14 +199,14 @@ def generate_train_data(args, g_ema,
                 }
 
                 idx = (i * args.batch_size) + j
-                filename = str(idx).zfill(6) + '.pkl'
-#                 print("writing: ", filename)
+                filename = str(idx - offset).zfill(6) + '.pkl'
+                #                 print("writing: ", filename)
                 torch.save(example, f'{path_train_data}/{filename}')
                 
-        
+            
 
 
-def get_masks_landmarks(args, images, seg_model, lmk_model2d, lmk_model3d):
+def get_masks_landmarks(args, images, seg_model, lmk_model2d, lmk_model3d, device):
     '''
     Run various models against the generated images to produce representative data.
     
@@ -326,7 +346,13 @@ def convert_to_uint8(images):
 
 
 
+
 def to_faceseg_tensor(x, dims=(256,256)):
+    transform_to_faceseg = transforms.Compose([
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225], inplace=False)
+    ])
+    
     x = F.interpolate(x, dims)
     if len(x.size()) > 3:
         # Batched.
@@ -342,6 +368,24 @@ def to_faceseg_tensor(x, dims=(256,256)):
     return x
 
 
+
+
+class CustomDataParallel(nn.Module):
+    def __init__(self, model, device):
+        super(CustomDataParallel, self).__init__()
+        self.model = nn.DataParallel(model).to(device)
+#         print(type(self.model))
+
+    def forward(self, x, **kwargs):
+        return self.model(x, **kwargs)
+
+    def __getattr__(self, name):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.model.module, name)
+        
+        
 
 
 if __name__ == "__main__":
@@ -362,16 +406,24 @@ if __name__ == "__main__":
     parser.add_argument("--base_path", type=str,
                         help="top level directory where all repos, etc. live",
                         default=None)
+    parser.add_argument("--mean_lmks_path", type=str, default=None,
+                        help="path to valid pre-calculated landmarks to ensure valid generation")
+    parser.add_argument("--dataparallel", action='store_true')
 
     
     args = parser.parse_args()
     device = 'cuda'
     
-    
-    transform_to_faceseg = transforms.Compose([
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225], inplace=False)
-    ])
+    mean_2d_landmark = None
+    if args.mean_lmks_path is not None:
+        print("Using pre-calculated landmarks to ensure generator produces valid images...")
+        mean_lmks = torch.load(f'{args.mean_lmks_path}')
+        mean_2d_landmark = mean_lmks['mean_2d']
+                               
+#     transform_to_faceseg = transforms.Compose([
+#         transforms.Normalize(mean=[0.485, 0.456, 0.406],
+#                              std=[0.229, 0.224, 0.225], inplace=False)
+#     ])
     transform_uint8 = transforms.Compose([
         # transforms.Resize(256),
         transforms.Lambda(convert_to_uint8)
@@ -386,6 +438,10 @@ if __name__ == "__main__":
     face_seg = load_facesegment(args.base_path, device)
     g_ema = load_generator(args.base_path, device)
     
+    if args.dataparallel:
+        print("Using DataParallel models...")
+        face_seg = CustomDataParallel(face_seg, device)
+        g_ema = CustomDataParallel(g_ema, device)
     
     
     if args.save_dir is None:
@@ -396,6 +452,7 @@ if __name__ == "__main__":
         
     if not os.path.exists(path_train_data):
         os.makedirs(path_train_data, exist_ok=True)
+    
     
     w_mean = g_ema.mean_latent(int(10e3)) # For truncation.
     noise = g_ema.make_noise()
@@ -408,14 +465,35 @@ if __name__ == "__main__":
         'return_latents': False
     }
     dims = (224, 224)
-    generate_train_data(args, g_ema, face_seg, fa, tddfa, dims, **kwargs)
+    generate_train_data(
+        args,
+        g_ema,
+        face_seg,
+        fa,
+        tddfa,
+        device,
+        dims,
+        mean_2d_landmark,
+        **kwargs
+    )
     
     
-#     # No longer need generator. Free memory before loading other models.
-#     #
-#     del g_ema
-    
+    # No longer need generator. Free memory before loading other models.
+    #
+    del g_ema
+    del face_seg
+    del fa
+    del tddfa
+  
+
+
+
     
 # Example of commandline run:
 #
-# python generate_dfr_dataset.py --size=20 --batch_size=10 --truncation=0.2 --workers=10 --base_path=/home/ec2-user/SageMaker --save_dir=/home/ec2-user/SageMaker/train_data_trunc02
+# CUDA_VISIBLE_DEVICES=0 python generate_dfr_dataset.py --size=200 --batch_size=20 --truncation=0.55 --workers=8 --base_path=/home/ec2-user/SageMaker --save_dir=/home/ec2-user/SageMaker/train_data/trunc02 --mean_lmks_path=$PWD/data/landmarks_trunc055.pkl
+
+
+# Example using DataParallel:
+#
+# CUDA_VISIBLE_DEVICES=0,1,2,3 python generate_dfr_dataset.py --size=10000 --batch_size=64 --truncation=0.78 --workers=10 --base_path=/home/ec2-user/SageMaker --save_dir=/home/ec2-user/SageMaker/train_data/trunc078 --dataparallel
