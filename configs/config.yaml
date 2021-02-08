@@ -1,0 +1,49 @@
+model_params:
+    # FLAME
+    'flame_model_path': './data/generic_model.pkl'  # acquire it from FLAME project page
+    'flame_lmk_embedding_path': './data/landmark_embedding.npy'
+    'tex_space_path': './data/FLAME_texture.npz'  # acquire it from FLAME project page
+    'head_template_mesh': './data/head_template_mesh.obj'
+    'camera_params': 3
+    'shape_params': 100
+    'expression_params': 50
+    'pose_params': 6
+    'tex_params': 50
+    'light_params': [9,3]
+    'use_face_contour': True
+
+    'cropped_size': 256
+    'batch_size': 1
+    'image_size': 224
+    'e_lr': 1e-4
+    'e_wd': 0.0001
+    'savefolder': './test_results'
+    # weights of losses and reg terms
+    'w_pho': 8
+    'w_lmks': 1
+    'w_shape_reg': 1e-4
+    'w_expr_reg': 1e-4
+    'w_pose_reg': 0
+
+
+
+# dataset_params:
+#   root_dir: data/bair
+#   frame_shape: [256, 256, 3]
+#   id_sampling: False
+#   augmentation_params:
+#     flip_param:
+#       horizontal_flip: True
+#       time_flip: True
+#     jitter_param:
+#       brightness: 0.1
+#       contrast: 0.1
+#       saturation: 0.1
+#       hue: 0.1
+
+
+# model_params:
+#   common_params:
+#     num_kp: 10
+#     num_channels: 3
+#     estimate_jacobian: True
