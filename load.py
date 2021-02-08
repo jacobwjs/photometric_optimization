@@ -43,23 +43,39 @@ def facesegment(base_path):
 def dfr(base_path, load_weights=False, train=False):
     sys.path.append(f'{base_path}/photometric_optimization/models')
     from models.DFR_regressor import DFRParamRegressor
-    
-#     print("Loading DFR regression model to device: ", device)
 
-    model_name = 'dfr_ckpt_epoch000499.pt'
-    local_path_to_model = f'{base_path}/pretrained_models' 
-    path_to_weights_dfr = f'{local_path_to_model}/{model_name}'
     
     # Initialize generator 
     #
     dfr = DFRParamRegressor()
     
-    if load_weights:
-        print("Loading weights... ", checkpoint_dfr)
-        checkpoint_dfr = path_to_weights_dfr
-        dfr.load_state_dict(torch.load(checkpoint_dfr)['dfr'], strict=False)
     
-#     dfr = dfr.to(device)
+    if load_weights:
+        model_name = 'dfr_ckpt_epoch000499.pt'
+        local_path_to_model = f'{base_path}/pretrained_models' 
+        checkpoint_dfr = f'{local_path_to_model}/{model_name}'
+        print("Loading weights... ", checkpoint_dfr)
+        
+        # Model was saved with nn.DataParallel, which includes
+        # "module." prepended to the weight name. This causes 
+        # the load to be erronous if not using 'dfr = nn.DataParallel(dfr)'
+        # We remove "module." to properly load the weights from the checkpoint.
+        #
+        state_dict = torch.load(checkpoint_dfr)['dfr']
+        from collections import OrderedDict
+        new_state_dict = OrderedDict()
+
+        for k, v in state_dict.items():
+            if k.find("module.") != -1:
+                end_idx = len("module.")
+                weight_name = k[end_idx:]
+                new_state_dict[weight_name] = v
+            else:
+                new_state_dict[k] = v
+
+        dfr.load_state_dict(new_state_dict, strict=True)
+    
+
     if train:
         dfr.train();
     else:
@@ -72,7 +88,6 @@ def dfr(base_path, load_weights=False, train=False):
 def rignet(base_path, load_weights=False, train=False, one_hot=False):
     sys.path.append(f'{base_path}/photometric_optimization/models')
     from models.RigNet import RigNet    
-#     print("Loading RigNet model to device: ", device)
      
     
     # Initialize model 
@@ -81,16 +96,24 @@ def rignet(base_path, load_weights=False, train=False, one_hot=False):
     if one_hot:
         notification += "ONE_HOT"
     
+    
     print(notification)
     rignet = RigNet(one_hot=one_hot)
+    
+    
+    ### TODO:
+    ### - Need to update to properly load weights once training
+    ###   is done.
+    ###
     if load_weights:
-        print("Loading weights... ", path_to_weights_rignet)
-        model_name = 'dfr_ckpt_epoch000499.pt'
-        local_path_to_model = f'{base_path}/pretrained_models' 
-        path_to_weights_rignet = f'{local_path_to_model}/{model_name}'
-        rignet.load_state_dict(torch.load(path_to_weights_rignet)['rignet'], strict=False)
+         print("!!! Need to implement loading weights for RigNet model")
+#         print("Loading weights... ", path_to_weights_rignet)
+#         model_name = 'rignet_ckpt_epoch000499.pt'
+#         local_path_to_model = f'{base_path}/pretrained_models' 
+#         path_to_weights_rignet = f'{local_path_to_model}/{model_name}'
+#         rignet.load_state_dict(torch.load(path_to_weights_rignet)['rignet'], strict=True)
 
-#     rignet = rignet.to(device)
+
     if train:
         rignet.train();
     else:
