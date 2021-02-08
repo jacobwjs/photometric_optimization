@@ -5,11 +5,61 @@ import torch.nn as nn
 import numpy as np
 
 
+def _get_config():
+    
+    def dict2obj(d):
+        if isinstance(d, list):
+            d = [dict2obj(x) for x in d]
+        if not isinstance(d, dict):
+            return d
+
+        class C(object):
+            pass
+
+        o = C()
+        for k in d:
+            o.__dict__[k] = dict2obj(d[k])
+        
+        return o
+
+
+    config = {
+#         # FLAME
+#         'flame_model_path': './data/generic_model.pkl',  # acquire it from FLAME project page
+#         'flame_lmk_embedding_path': './data/landmark_embedding.npy',
+#         'tex_space_path': './data/FLAME_texture.npz',  # acquire it from FLAME project page
+        'camera_params': 3,
+        'shape_params': 100,
+        'expression_params': 50,
+        'pose_params': 6,
+        'tex_params': 50,
+        'light_params': [9,3],
+        'use_face_contour': True,
+
+#         'cropped_size': 256,
+#         'batch_size': 1,
+#         'image_size': 224,
+#         'e_lr': 1e-4,
+#         'e_wd': 0.0001,
+#         'savefolder': './test_results',
+#         # weights of losses and reg terms
+#         'w_pho': 8,
+#         'w_lmks': 1,
+#         'w_shape_reg': 1e-4,
+#         'w_expr_reg': 1e-4,
+#         'w_pose_reg': 0,
+    }
+    
+    return dict2obj(config)
+
 
 class DFRParamRegressor(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config=None):
         super(DFRParamRegressor, self).__init__()
         
+        if config is None:
+            config = _get_config()
+            
         input_size = 18*512 # W+ dims from StyleGAN(2)
         
         output_size = config.shape_params + \
@@ -37,23 +87,9 @@ class DFRParamRegressor(nn.Module):
         
         print("Output params dims: ", output_size)
         
-       # dim1 = 1024
-       # dim2 = 1024
+
         dim1 = 512
         dim2 = 512
-#         dim1 = 256
-#         dim2 = 256
-#        dim1 = 128
-#        dim2 = 128
- 
-#         dim1 = 2048
-#         dim2 = 1024
-       # dim1 = 1024
-       # dim2 = 512
-       # dim1 = 512
-       # dim2 = 256
-#        dim1 = 256
-#        dim2 = 128
 
         self.fc1 = nn.Linear(input_size, dim1)
         self.fc2 = nn.Linear(dim1, dim2)
@@ -64,8 +100,13 @@ class DFRParamRegressor(nn.Module):
 #         self.register_buffer('fc2', fc2)
 #         self.register_buffer('fc3', fc3)
     
-    
+    ### TODO:
+    ### - Update to use nn.Flatten()(x) on input, instead of having to 
+    ###   flatten before moving through model.
+    ### - Return dictionary with keys for each parameter.
+    ###
     def forward(self, x):
+        ### x = nn.Flatten()(x)
         x = self.fc1(x)
         x = nn.ELU()(x)
         x = self.fc2(x)
@@ -75,14 +116,6 @@ class DFRParamRegressor(nn.Module):
         
         # Return values split into shape, expression, pose
         #
-#         return torch.split(x, [self.shape_idx, self.expression_idx, self.pose_idx], dim=-1)
-
-#         return torch.split(x, [self.shape_idx,
-#                                self.expression_idx,
-#                                self.pose_idx,
-#                                self.tex_idx,
-#                                self.cam_idx], dim=-1)
-
         idx_split = [
             self.shape_idx,
             self.expression_idx,
@@ -92,6 +125,7 @@ class DFRParamRegressor(nn.Module):
             self.light_idx
         ]
         shape, expr, pose, tex, cam, light =  torch.split(x, idx_split, dim=-1)
+        
         # Reshape light params to expected form.
         # [B,9,3]
         #

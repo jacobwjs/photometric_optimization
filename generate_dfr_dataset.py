@@ -179,6 +179,10 @@ def generate_train_data(args,
                                                                     images,
                                                                     image_masks)):
                 
+                ### TODO:
+                ### - Need to generate a new image and run the above on it, instead
+                ###   of just skipping it.
+                ###
                 # Ensure we found a valid landmark from the image.
                 # Sometimes non-sense is returned with truncation
                 # value on SG2 generator is high.
@@ -491,7 +495,7 @@ if __name__ == "__main__":
     
 # Example of commandline run:
 #
-# CUDA_VISIBLE_DEVICES=0 python generate_dfr_dataset.py --size=200 --batch_size=20 --truncation=0.55 --workers=8 --base_path=/home/ec2-user/SageMaker --save_dir=/home/ec2-user/SageMaker/train_data/trunc02 --mean_lmks_path=$PWD/data/landmarks_trunc055.pkl
+# CUDA_VISIBLE_DEVICES=0 python generate_dfr_dataset.py --size=200 --batch_size=20 --truncation=0.55 --workers=8 --base_path=/home/ec2-user/SageMaker --save_dir=/home/ec2-user/SageMaker/train_data/trunc055 --mean_lmks_path=$PWD/data/landmarks_trunc055.pkl
 
 
 # Example using DataParallel:

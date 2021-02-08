@@ -152,11 +152,15 @@ class DatasetDFR(data.Dataset):
         filename = str(index).zfill(6) + '.pkl'
 #         filename = str(index).ljust(6, '0') + '.pkl'
 #         filename = self.files[index]
-        try:
-            x = torch.load(f'{self.path}/{filename}')
-        except:
-            return None
+
+        # Use with collate_fn in dataloader
+        #
+#         try:
+#             x = torch.load(f'{self.path}/{filename}')
+#         except:
+#             return None
         
+        x = torch.load(f'{self.path}/{filename}')
         return x
     
     
@@ -627,7 +631,7 @@ def train_distributed(args, config, savefolder, train_dir, dfr=None):
             dataset,
             num_replicas=torch.cuda.device_count(),
 # #             num_replicas=4,
-            rank = args.local_rank,
+#             rank = args.local_rank,
         )
 
 #     loader = None
@@ -636,7 +640,7 @@ def train_distributed(args, config, savefolder, train_dir, dfr=None):
         batch_size=batch_size,
         shuffle=(sampler is None),
         num_workers=args.workers,
-        collate_fn=collate_fn,
+#         collate_fn=collate_fn,
         pin_memory=True,
         sampler=sampler,
         drop_last=True
@@ -849,7 +853,7 @@ def train_render(args, dfr, render, flame, flametex,
         for example in dataloader:
             latents = example['latents'].cuda(args.local_rank)
             landmarks_2d_gt = example['landmarks_2d_gt'].cuda(args.local_rank)
-            landmarks_3d_gt = example['landmarks_3d_gt'].to(args.local_rank)
+            landmarks_3d_gt = example['landmarks_3d_gt'].cuda(args.local_rank)
             images = example['images'].cuda(args.local_rank)
             image_masks = example['image_masks'].cuda(args.local_rank)
 
