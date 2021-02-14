@@ -118,6 +118,27 @@ def load_3ddfa(args, base_path):
     
 
     
+def gen_latents_images(dims, batch_size, g_ema):
+    images = []
+    batch_latents = g_ema.get_latent(torch.randn((batch_size,
+                                                  18,
+                                                  512)).to(device)).to('cpu')
+
+    
+    imgs_gen, _ = g_ema([batch_latents.to(device)], **kwargs)
+    imgs_gen = imgs_gen.cpu()
+    images.append(normalize_float_img(imgs_gen))
+
+    
+    # Downsample images to size (i.e. dims) for rendering optimization expects.
+    #
+    images = torch.cat(images, dim=0)
+    images = F.interpolate(images, dims)
+    
+    
+    return batch_latents, images
+
+    
     
 def generate_train_data(args,
                         g_ema,
@@ -142,19 +163,7 @@ def generate_train_data(args,
     pbar = tqdm(range(0, batches), dynamic_ncols=True, smoothing=0.01)
     for i in pbar:
         with torch.no_grad():
-            images = []
-            batch_latents = g_ema.get_latent(torch.randn((args.batch_size,
-                                                          18,
-                                                          512)).to(device)).to('cpu')
-            
-            imgs_gen, _ = g_ema([batch_latents.to(device)], **kwargs)
-            imgs_gen = imgs_gen.cpu()
-            images.append(normalize_float_img(imgs_gen))
-            
-            # Downsample images to size (i.e. dims) for rendering optimization expects.
-            #
-            images = torch.cat(images, dim=0)
-            images = F.interpolate(images, dims)
+            batch_latents, images = gen_latents_images(dims, args.batch_size, g_ema)
 
             # Form masks that segment out only the face, as well as getting
             # 2d and 3d landmarks to be used as "ground truth".
@@ -184,14 +193,47 @@ def generate_train_data(args,
                 ###   of just skipping it.
                 ###
                 # Ensure we found a valid landmark from the image.
-                # Sometimes non-sense is returned with truncation
+                # Sometimes nonsense is returned with truncation
                 # value on SG2 generator is high.
                 #
                 if mean_2d_landmark is not None:
-                    dist = (landmark_2d - mean_2d_landmark).abs().mean()
-                    if dist > 0.3:
-#                         print("Skipping: found invalid 2d landmark...")
-                        print("Mean landmark difference larger than threshold")
+                    dist = (landmark_2d - mean_2d_landmark).abs().mean()                    
+                    while dist > 0.2:
+                        print("\n\nMean landmark difference larger than threshold")
+                        # 1) generate new latent
+                        # 2) generate image from latent
+                        # 3) interpolate
+                        #
+                        batch_latents, images = gen_latents_images(dims, 1, g_ema)
+                        
+                        # 4) call get_masks_landmarks()
+                        #
+                        # Form masks that segment out only the face, as well as getting
+                        # 2d and 3d landmarks to be used as "ground truth".
+                        #
+                        try:
+                            mask, landmark_2d, landmark_3d = get_masks_landmarks(
+                                args,
+                                images,
+                                seg_model,
+                                lmk_model2d,
+                                lmk_model3d,
+                                device
+                            )
+                        except:
+                            print("ERROR: failed to compute landmarks...")
+                            dist = 1.0
+                            continue
+                        
+                        dist = (landmark_2d - mean_2d_landmark).abs().mean()
+                        
+                        
+#                         print("latent: ", latent.shape)
+#                         print("lmk2d: ", landmark_2d.shape)
+#                         print("lmk3d: ", landmark_3d.shape)
+#                         print("image: ", image.shape)
+#                         print("image_mask: ", mask.shape)
+                        
                     
                 example = None
                 example = {
