@@ -537,7 +537,7 @@ if __name__ == "__main__":
     
 # Example of commandline run:
 #
-# CUDA_VISIBLE_DEVICES=0 python generate_dfr_dataset.py --size=200 --batch_size=20 --truncation=0.55 --workers=8 --base_path=/home/ec2-user/SageMaker --save_dir=/home/ec2-user/SageMaker/train_data/trunc055 --mean_lmks_path=$PWD/data/landmarks_trunc055.pkl
+# CUDA_VISIBLE_DEVICES=0 python generate_dfr_dataset.py --size=25000 --batch_size=20 --truncation=0.65 --workers=6 --base_path=/home/ec2-user/SageMaker --save_dir=/home/ec2-user/SageMaker/train_data/rignet_B --mean_lmks_path=$PWD/data/landmarks_trunc055.pkl
 
 
 # Example using DataParallel:
