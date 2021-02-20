@@ -40,7 +40,7 @@ def facesegment(base_path):
     return face_seg
 
 
-def dfr(base_path, load_weights=False, train=False):
+def dfr(base_path, load_weights=False, training=False):
     sys.path.append(f'{base_path}/photometric_optimization/models')
     from models.DFR_regressor import DFRParamRegressor
 
@@ -76,16 +76,18 @@ def dfr(base_path, load_weights=False, train=False):
         dfr.load_state_dict(new_state_dict, strict=True)
     
 
-    if train:
+    if training:
         dfr.train();
+        print("\tDFR model in training mode...")
     else:
         dfr.eval();
+        print("\tDFR model in eval mode...")
     
     return dfr
 
 
 
-def rignet(base_path, load_weights=False, train=False, one_hot=False):
+def rignet(base_path, load_weights=False, training=False, one_hot=False):
     sys.path.append(f'{base_path}/photometric_optimization/models')
     from models.RigNet import RigNet    
      
@@ -106,18 +108,19 @@ def rignet(base_path, load_weights=False, train=False, one_hot=False):
     ###   is done.
     ###
     if load_weights:
-         print("!!! Need to implement loading weights for RigNet model")
-#         print("Loading weights... ", path_to_weights_rignet)
-#         model_name = 'rignet_ckpt_epoch000499.pt'
-#         local_path_to_model = f'{base_path}/pretrained_models' 
-#         path_to_weights_rignet = f'{local_path_to_model}/{model_name}'
-#         rignet.load_state_dict(torch.load(path_to_weights_rignet)['rignet'], strict=True)
+        model_name = 'rignet_ckpt_epoch000025.pt'
+        local_path_to_model = f'{base_path}/pretrained_models' 
+        path_to_weights_rignet = f'{local_path_to_model}/{model_name}'
+        print("Loading weights... ", path_to_weights_rignet)
+        rignet.load_state_dict(torch.load(path_to_weights_rignet)['rignet'], strict=True)
 
 
-    if train:
+    if training:
         rignet.train();
+        print("\tRigNet model in training mode...")
     else:
         rignet.eval();
+        print("\tRigNet model in eval mode...")
     
     return rignet
 

@@ -41,6 +41,7 @@ def set_seed(seed):
     random.seed(seed)
 
     
+    
 def synchronize():
     if not dist.is_available():
         return
@@ -53,7 +54,8 @@ def synchronize():
     if world_size == 1:
         return
 
-    dist.barrier
+    dist.barrier()
+    
     
     
 def get_world_size():
@@ -64,6 +66,7 @@ def get_world_size():
         return 1
 
     return dist.get_world_size()
+
 
 
 def get_rank():
@@ -88,12 +91,14 @@ def data_sampler(dataset, shuffle, distributed):
         return data.SequentialSampler(dataset)
     
 
+    
 def sample_data(loader):
     while True:
         for batch in loader:
             yield batch
-  
-
+            
+            
+            
 def squeeze_dims(x, dims=3):
     '''Add in batch dim if doesn't exist.'''
     if len(x.shape) == dims:
@@ -120,6 +125,7 @@ def collate_fn(batch):
     A_dict['images'] = images_A
     A_dict['image_masks'] = image_masks_A
 
+    
     w_B = torch.cat([squeeze_dims(x['latents'], dims=3) for x in B], dim=0)
     landmarks_2d_gt_B = torch.cat([squeeze_dims(x['landmarks_2d_gt'], dims=3) for x in B], dim=0)
     landmarks_3d_gt_B = torch.cat([squeeze_dims(x['landmarks_3d_gt'], dims=3) for x in B], dim=0)
@@ -134,7 +140,8 @@ def collate_fn(batch):
 
     return A_dict, B_dict
 
-             
+     
+    
 class DatasetSiamese(data.Dataset):
     def __init__(self, path_to_dir_A, path_to_dir_B):
         self.path_A = path_to_dir_A
@@ -156,20 +163,33 @@ class DatasetSiamese(data.Dataset):
     
     
 
-def save_checkpoint(path, epoch, model, optim, losses=None):
+def save_checkpoint(savefolder, epoch, model, optim, losses=None, distributed=False):
+        
     epoch = str(epoch).zfill(6)
     
-    if losses is not None:
-        torch.save(losses, f'{path}/losses_epoch{epoch}.pkl')
     
-    model_data = {
-        'epoch': epoch,
-        'rignet': model.state_dict(),
-        'optim': optim.state_dict()
-    }
-    torch.save(model_data, f'{path}/dfr_ckpt_epoch{epoch}.pt')
+    if losses is not None:
+        torch.save(losses, f'{savefolder}/losses_epoch{epoch}.pt')
+    
+    
+    model_data = {}
+    model_data['epoch'] = epoch
+    model_data['optim'] = optim.state_dict()
+    model_data['rignet'] =  model.state_dict()
+    
+    ### Comment:
+    ### - Only needed if using nn.DataParallel
+    ###
+#     if distributed:
+#         model_data['rignet'] =  model.module.state_dict()
+#     else:
+#         model_data['rignet'] =  model.state_dict()
+        
+        
+    torch.save(model_data, f'{savefolder}/ringnet_ckpt_epoch{epoch}.pt')
 
 
+    
     
 def save_rendered_imgs(savefolder, 
                        epoch,
@@ -182,9 +202,7 @@ def save_rendered_imgs(savefolder,
                        albedos=None,
                        albedo_images=None,
                        tag=None):
-
-    if not os.path.exists(savefolder):
-        os.makedirs(savefolder, exist_ok=True)
+    
     
     grids = {}
     grids['images'] = torchvision.utils.make_grid(images).detach().cpu()
@@ -192,6 +210,7 @@ def save_rendered_imgs(savefolder,
         util.tensor_vis_landmarks(images.clone().detach(), landmarks_gt))
     grids['landmarks2d'] = torchvision.utils.make_grid(
         util.tensor_vis_landmarks(images, landmarks2d))
+    
     
     if landmarks3d is not None:
         grids['landmarks3d'] = torchvision.utils.make_grid(
@@ -206,13 +225,16 @@ def save_rendered_imgs(savefolder,
     if albedos is not None:
         grids['tex'] = torchvision.utils.make_grid(F.interpolate(albedos, [224, 224])).detach().cpu()
 
+        
     grid = torch.cat(list(grids.values()), 1)
     grid_image = (grid.numpy().transpose(1, 2, 0).copy() * 255)[:, :, [2, 1, 0]]
     grid_image = np.minimum(np.maximum(grid_image, 0), 255).astype(np.uint8)
 
+    
     filename = str(epoch).zfill(6)
     if tag is not None:
         filename = filename + tag
+        
         
     cv2.imwrite('{}/{}.jpg'.format(savefolder, filename), grid_image)
     
@@ -228,49 +250,37 @@ class LossL2(nn.Module):
     
     
     
-def latent_reconstruction_loss(rignet, w_A, params_A, w_B, params_B, labels_in, scale_recon=10.0):
+def latent_reconstruction_loss(rignet,
+                               w_A, p_A,
+                               w_B, p_B, 
+                               labels_in, scale_recon=10.0):
     loss_recon = 0.0
-    w_Ahat = rignet(w_A, params_A, labels_in) # Reconsruct self
-    loss_recon = (w_Ahat - w_A).abs().square().mean() * scale_recon
-    w_Bhat = rignet(w_B, params_B, labels_in) # Reconsruct self
-    loss_recon += (w_Bhat - w_B).abs().square().mean() * scale_recon
+    w_reconA = rignet(w_A, p_A, labels_in) # Reconsruct self
+    loss_recon = (w_reconA - w_A).abs().square().mean() * scale_recon
+    w_reconB = rignet(w_B, p_B, labels_in) # Reconsruct self
+    loss_recon += (w_reconB - w_B).abs().square().mean() * scale_recon
+    
     return loss_recon
+
    
     
-def cycle_editing_loss(epoch, texture_mean, example, param,
+def cycle_editing_loss(args, epoch, texture_mean, example, param,
                        _flame, _flametex, _render):
-#     import util
     
-    loss_mse = nn.MSELoss().cuda()
+    loss_mse = nn.MSELoss().cuda(args.local_rank)
 
 
-    latents = example['latents'].cuda()
-    landmarks_2d_gt = example['landmarks_2d_gt'].cuda()
-    landmarks_3d_gt = example['landmarks_3d_gt'].cuda()
-    images = example['images'].cuda()
-    image_masks = example['image_masks'].cuda()
+    latents = example['latents'].cuda(args.local_rank)
+    landmarks_2d_gt = example['landmarks_2d_gt'].cuda(args.local_rank)
+    landmarks_3d_gt = example['landmarks_3d_gt'].cuda(args.local_rank)
+    images = example['images'].cuda(args.local_rank)
+    image_masks = example['image_masks'].cuda(args.local_rank)
     
     batch_size = latents.shape[0]
     
     # shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
     shape, expression, pose, tex, cam, lights = param
-#     vertices, landmarks2d, landmarks3d = _flame(shape_params=shape,
-#                                                expression_params=expression,
-#                                                pose_params=pose)
 
-    
-    
-#     trans_vertices = util.batch_orth_proj(vertices, cam);
-#     trans_vertices[..., 1:] = - trans_vertices[..., 1:]
-#     landmarks2d = util.batch_orth_proj(landmarks2d, cam);
-#     landmarks2d[..., 1:] = - landmarks2d[..., 1:]
-#     landmarks3d = util.batch_orth_proj(landmarks3d, cam);
-#     landmarks3d[..., 1:] = - landmarks3d[..., 1:]
-    
-#     # render
-#     #
-#     albedos = _flametex(tex) / 255.
-#     ops = _render(vertices, trans_vertices, albedos, lights)
 
     render_outputs = render_all(param, _flame, _flametex, _render)
     vertices = render_outputs['vertices']
@@ -283,8 +293,6 @@ def cycle_editing_loss(epoch, texture_mean, example, param,
     
     
     losses = {}
-#     print(landmarks2d.shape)
-#     print(landmarks_2d_gt.shape)
     losses['landmark_2d'] = util.l2_distance(landmarks2d[:, :, :2],
                                               landmarks_2d_gt[:, :, :2]) * 10.0
     losses['landmark_3d'] = util.l2_distance(landmarks3d[:, :, :2],
@@ -306,27 +314,12 @@ def cycle_editing_loss(epoch, texture_mean, example, param,
     losses['all_loss'] = all_loss
 #     losses_to_plot['all_loss'].append(losses['all_loss'].item())
 
-
-#     if savefolder is not None:
-#         bsize = range(0, batch_size_save)
-#         shape_images = render.render_shape(vertices, trans_vertices, images)
-#         save_rendered_imgs(
-#             savefolder,
-#             epoch,
-#             images[bsize].clone(),
-#             landmarks_2d_gt.clone(),
-#             landmarks2d.clone(),
-#             landmarks3d.clone(),
-#             predicted_images[bsize].detach().cpu().float().clone(),
-#             shape_images[bsize].clone(),
-#             albedos[bsize].clone(),
-#             ops['albedo_images'].detach().cpu().clone()[bsize],                        
-#         )
-
     return losses
-    
+
+
     
 def render_all(param, _flame, _flametex, _render):
+
     shape, expression, pose, tex, cam, lights = param
     vertices, landmarks2d, landmarks3d = _flame(shape_params=shape,
                                                expression_params=expression,
@@ -367,14 +360,15 @@ def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
         os.makedirs(savefolder, exist_ok=True)
 
         
-    optim = torch.optim.Adam(
-                rignet.parameters(),
-                lr=1e-3,
-#                 weight_decay=0.00001 # config.e_wd
-    )
+    optim = torch.optim.Adam(rignet.parameters(), lr=1e-4)
+#     optim = torch.optim.Adadelta(rignet.parameters(), lr=0.001) # default Adadelta
+#     optim = torch.optim.SGD(rignet.parameters(), lr=.1, momentum=.9) # default SGD # Trains
+#     optim = torch.optim.RMSprop(rignet.parameters()) # default RMSprop
+#     optim = torch.optim.Adamax(rignet.parameters()) # default Adamax
     
     
 #     loader = sample_data(loader)
+    args.local_rank = 0
 
     
     losses_to_plot = {}
@@ -395,9 +389,10 @@ def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
     modulo_save_imgs = args.iter_save_img
     modulo_save_model = args.iter_save_ckpt
     
+    
     # shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
     # onehot_cam = F.one_hot(torch.tensor([4]), 6).unsqueeze(0)
-    onehot_pose = F.one_hot(torch.tensor([2]), 6).unsqueeze(0)
+    onehot_pose = F.one_hot(torch.tensor([2]), 6)#.unsqueeze(0)
     # labels_in = torch.cat((onehot_pose, onehot_expr), dim=0).cuda()
     labels_in = onehot_pose
     labels_in = labels_in.expand(args.batch_size, -1, -1)
@@ -406,6 +401,7 @@ def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
     
     texture_mean = flametex.get_texture_mean(args.batch_size) / 255.
     texture_mean = texture_mean.cuda()
+    
     
     save_batch_size = args.save_batch_size
     
@@ -429,15 +425,337 @@ def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
                 print('Skipping A, B = loader')
                 continue
 
+
+            # 1) Calculate parameters from latents
+            #
+            # params_A = dfr(w_A.view(w_A.shape[0], -1))
+            # params_B = dfr(w_B.view(w_B.shape[0], -1))
+            params_A = dfr(nn.Flatten()(w_A))
+            params_B = dfr(nn.Flatten()(w_B))
+            
+            
+            # Enforce latents produced from RigNet are bound to the
+            # original distribution.
+            # That is, latents that create parameters, should be able
+            # to take those parameters and re-generate the original latents.
+            #
+            # e.g. param = dfr(w); w_hat = rignet(w, param); MSE(w - w_hat)
+            #
+            loss_recon = latent_reconstruction_loss(rignet,
+                                                    w_A, params_A,
+                                                    w_B, params_B,
+                                                    labels_in, scale_recon=10.0)
+
+
+            # 2) Transfer semantic "style" (e.g. pose) from one latent to another.
+            #
+            w_AB = rignet(w_A, params_B, labels_in) # Transfer semantic params from B to latent A
+            w_BA = rignet(w_B, params_A, labels_in) # Transfer semantic params from A to latent B
+
+
+            # 3) Create the cycle, where transferred paramter to latent, and latent to parameter
+            #    should match.
+            #
+            params_AB = dfr(nn.Flatten()(w_AB))
+            params_BA = dfr(nn.Flatten()(w_BA))
+            
+            
+            # 
+            # shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
+            params_edit_A = [x.clone() for x in params_A]
+            params_edit_B = [x.clone() for x in params_B]
+#             params_edit_A = [x for x in params_A]
+#             params_edit_B = [x for x in params_B]
+
+
+            ### TODO:
+            ### - Update below to use labels to dictate what is swapped in
+            ###   for the editing loss.
+            ###
+            params_edit_A[2] = params_BA[2] # Ensure pose is maintained
+            params_edit_B[2] = params_AB[2] # Ensure pose is maintained
+
+
+            # Losses
+            # ------------------------------------------------
+            total_loss = 0.0
+
+
+            loss_A = cycle_editing_loss(
+                args, k, texture_mean, A, params_edit_A, flame, flametex, render,
+            )
+            loss_B = cycle_editing_loss(
+                args, k, texture_mean, B, params_edit_B, flame, flametex, render,
+            )
+
+#             loss_A = cycle_editing_loss(
+#                 args, k, texture_mean, A, params_edit_B, flame, flametex, render,
+#             )
+#             loss_B = cycle_editing_loss(
+#                 args, k, texture_mean, B, params_edit_A, flame, flametex, render,
+#             )
+
+
+            loss_edit = loss_A['all_loss'] + loss_B['all_loss']
+
+
+            total_loss += loss_recon
+            total_loss += loss_edit 
+
+
+            optim.zero_grad()
+            total_loss.backward()
+            optim.step()
+
+
+            pbar.set_description(
+                    (
+                        f"total: {total_loss:.4f}; edit: {loss_edit:.4f}; recon: {loss_recon:.4f}; "
+                    )
+                )
+
+#         if k % 100 == 0:
+#             print("epoch: ", k, ", loss_edit: ", total_loss.item(), ", loss_recon: ", loss_recon.item())
+    
+
+        if k % modulo_save_imgs == 0:
+            render_outputs = render_all(params_edit_A, flame, flametex, render)
+            vertices = render_outputs['vertices']
+            landmarks2d = render_outputs['landmarks2d']
+            landmarks3d = render_outputs['landmarks3d']
+            trans_vertices = render_outputs['trans_vertices']
+            albedos = render_outputs['albedos']
+            ops = render_outputs['ops']
+            predicted_images = ops['images']
+
+            # Assign which set of data to write out
+            #
+            images = images_A
+            landmarks_2d_gt = landmarks_2d_gt_A
+
+            if savefolder is not None:
+                bsize = range(0, save_batch_size)
+                shape_images = render.render_shape(vertices, trans_vertices, images)
+                save_rendered_imgs(
+                    savefolder,
+                    k,
+                    images[bsize].clone(),
+                    landmarks_2d_gt.clone(),
+                    landmarks2d.clone(),
+                    landmarks3d.clone(),
+                    predicted_images[bsize].detach().cpu().float().clone(),
+                    shape_images[bsize].clone(),
+                    albedos[bsize].clone(),
+                    ops['albedo_images'].detach().cpu().clone()[bsize],
+                    tag='_verA'
+                )
+
+#             render_outputs = render_all(params_B, flame, flametex, render)
+            render_outputs = render_all(params_edit_B, flame, flametex, render)
+            vertices = render_outputs['vertices']
+            landmarks2d = render_outputs['landmarks2d']
+            landmarks3d = render_outputs['landmarks3d']
+            trans_vertices = render_outputs['trans_vertices']
+            albedos = render_outputs['albedos']
+            ops = render_outputs['ops']
+            predicted_images = ops['images']
+
+
+            # Assign which set of data to write out
+            #
+            images = images_B
+            landmarks_2d_gt = landmarks_2d_gt_B
+
+            if savefolder is not None:
+                bsize = range(0, save_batch_size)
+                shape_images = render.render_shape(vertices, trans_vertices, images)
+                save_rendered_imgs(
+                    savefolder,
+                    k,
+                    images[bsize].clone(),
+                    landmarks_2d_gt.clone(),
+                    landmarks2d.clone(),
+                    landmarks3d.clone(),
+                    predicted_images[bsize].detach().cpu().float().clone(),
+                    shape_images[bsize].clone(),
+                    albedos[bsize].clone(),
+                    ops['albedo_images'].detach().cpu().clone()[bsize],
+                    tag='_verB'
+                )
+
+        # Save current model.
+        #
+        if k % modulo_save_model == 0:
+            save_checkpoint(
+                savefolder=savefolder,
+                epoch=k,
+                losses=losses_to_plot,
+                model=rignet,
+                optim=optim,
+                distributed=args.distributed)
+            
+    # Save current model.
+    #
+    save_checkpoint(
+        savefolder=savefolder,
+        epoch=k,
+        losses=losses_to_plot,
+        model=rignet,
+        optim=optim,
+        distributed=args.distributed)
+
+
                 
-#             print("w_A: ", w_A.shape)
-#             print("w_B: ", w_B.shape)
-#             print("landmarks_2d_gt_A: ", landmarks_2d_gt_A.shape)
-#             print("landmarks_2d_gt_B: ", landmarks_2d_gt_B.shape)
-#             print("images_A: ", images_A.shape)
-#             print("images_B: ", images_B.shape)
+                
+def train_distributed(args, config, savefolder):
+    
+    if not os.path.exists(savefolder):
+        os.makedirs(savefolder, exist_ok=True)
+    
+    
+    dist.init_process_group(
+        backend='nccl',
+        init_method='env://'
+    )
+    
+    
+#     synchronize()
+    args.local_rank = get_rank()
+    
+    
+    # this is the total # of GPUs across all nodes
+    # if using 2 nodes with 4 GPUs each, world size is 8
+    args.world_size = torch.distributed.get_world_size()
+    print("### global rank of curr node: {} of {}".format(get_rank(), get_world_size()))
 
+        
+    
+    # For multiprocessing distributed, DistributedDataParallel constructor
+    # should always set the single device scope, otherwise,
+    # DistributedDataParallel will use all available devices.
+    #
+    torch.cuda.set_device(args.local_rank)
+    
+    
+    # Load flame and render models.
+    #
+    render = load.renderer(args.base_path, model_params).cuda(args.local_rank)
+    flame = load.flame(args.base_path, model_params).cuda(args.local_rank)
+    flametex = load.flametex(args.base_path, model_params).cuda(args.local_rank)
 
+    
+    # Load DFR, and RigNet models.
+    #
+    one_hot = True
+    rignet = load.rignet(args.base_path, one_hot=one_hot, training=True).cuda(args.local_rank)
+    dfr = load.dfr(args.base_path, load_weights=True).cuda(args.local_rank)
+    
+    
+    # Used to regularize textures.
+    #
+    texture_mean = flametex.get_texture_mean(args.batch_size) / 255.
+    texture_mean = texture_mean.cuda(args.local_rank)
+    
+    
+    save_batch_size = args.save_batch_size
+    batch_size = args.batch_size
+    workers = args.workers
+    modulo_save_imgs = args.iter_save_img
+    modulo_save_model = args.iter_save_ckpt
+    epochs = args.iter
+    
+    
+    loss_mse = nn.MSELoss().cuda(args.local_rank)
+    optim = torch.optim.Adam(
+                rignet.parameters(),
+                lr=1e-3,
+    )
+    
+#     train_dir_A = f'{args.base_path}/train_data/testing_A'
+#     train_dir_B = f'{args.base_path}/train_data/testing_B'
+    train_dir_A = f'{args.base_path}/train_data/rignet_A'
+    train_dir_B = f'{args.base_path}/train_data/rignet_B'
+    if args.local_rank == 0:
+        print("train_dir: ", train_dir_A)
+        print("train_dir: ", train_dir_B)
+        
+        
+    dataset = DatasetSiamese(train_dir_A, train_dir_B)
+    sampler = None
+    if args.distributed:
+        sampler = torch.utils.data.distributed.DistributedSampler(
+            dataset,
+            num_replicas=torch.cuda.device_count(),
+#             num_replicas=4,
+            rank = args.local_rank,
+        )
+    
+    
+    loader = data.DataLoader(
+        dataset=dataset,
+        batch_size=batch_size,
+        shuffle=(sampler is None),
+        num_workers=args.workers,
+        collate_fn=collate_fn,
+        pin_memory=True,
+        sampler=sampler,
+        drop_last=True
+    )
+    
+    
+    if args.local_rank == 0:
+        losses_to_plot = {}
+        losses_to_plot['all_loss'] = []
+        losses_to_plot['landmark_2d'] = []
+        losses_to_plot['landmark_3d'] = []
+        losses_to_plot['shape_reg'] = []
+        losses_to_plot['shape_reg'] = []
+        losses_to_plot['expression_reg'] = []
+        losses_to_plot['pose_reg'] = []
+        losses_to_plot['photometric_texture'] = []
+        losses_to_plot['texture_reg'] = []
+    
+    
+    pbar = tqdm(range(0, epochs), dynamic_ncols=True, smoothing=0.01)
+    for k in pbar:
+        if args.distributed:
+            sampler.set_epoch(k)
+            
+            
+        for A, B in loader:
+            try:
+                w_A = A['latents'].cuda(args.local_rank)
+                landmarks_2d_gt_A = A['landmarks_2d_gt'].cuda(args.local_rank)
+                images_A = A['images'].cuda(args.local_rank)
+                image_masks_A = A['image_masks'].cuda(args.local_rank)
+
+                w_B = B['latents'].cuda(args.local_rank)
+                landmarks_2d_gt_B = B['landmarks_2d_gt'].cuda(args.local_rank)
+                images_B = B['images'].cuda(args.local_rank)
+                image_masks_B = B['image_masks'].cuda(args.local_rank)
+
+            except:
+                print('Skipping A, B = loader')
+                continue
+                
+                
+            ### TODO:
+            ### - Once this is verified to properly transfer pose, alter below to randomly
+            ###   decide with semantic parameter is choosen, that we can conditionally
+            ###   decide what to transfer using calls to RigNet that go beyond pose.
+            ###
+            # Create a labels to properly map the latent space with a label, and what is
+            # being "edited" below based on the output of the DFR network.
+            #
+            # e.g. shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
+            #
+            # onehot_cam = F.one_hot(torch.tensor([4]), 6).unsqueeze(0)
+            onehot_pose = F.one_hot(torch.tensor([2]), 6).unsqueeze(0)
+            # labels_in = torch.cat((onehot_pose, onehot_expr), dim=0).cuda()
+            labels_in = onehot_pose
+            labels_in = labels_in.expand(batch_size, -1, -1).cuda(args.local_rank)
+    
+    
             # 1) Calculate parameters from latents
             #
             # params_A = dfr(w_A.view(w_A.shape[0], -1))
@@ -495,10 +813,10 @@ def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
 
 
             loss_A = cycle_editing_loss(
-                k, texture_mean, A, params_edit_A, flame, flametex, render,
+                args, k, texture_mean, A, params_edit_A, flame, flametex, render,
             )
             loss_B = cycle_editing_loss(
-                k, texture_mean, B, params_edit_B, flame, flametex, render,
+                args, k, texture_mean, B, params_edit_B, flame, flametex, render,
             )
 
 
@@ -519,375 +837,107 @@ def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
                         f"total: {total_loss:.4f}; edit: {loss_edit:.4f}; recon: {loss_recon:.4f}; "
                     )
                 )
-
-#         if k % 100 == 0:
-#             print("epoch: ", k, ", loss_edit: ", total_loss.item(), ", loss_recon: ", loss_recon.item())
-    
-
-        if k % modulo_save_imgs == 0:
-#             savefolder = path_save
-#             render_outputs = render_all(params_A, flame, flametex, render)
-            render_outputs = render_all(params_edit_A, flame, flametex, render)
-            vertices = render_outputs['vertices']
-            landmarks2d = render_outputs['landmarks2d']
-            landmarks3d = render_outputs['landmarks3d']
-            trans_vertices = render_outputs['trans_vertices']
-            albedos = render_outputs['albedos']
-            ops = render_outputs['ops']
-            predicted_images = ops['images']
-
-            # Assign which set of data to write out
-            #
-            images = images_A
-            landmarks_2d_gt = landmarks_2d_gt_A
-        
-            if savefolder is not None:
-                bsize = range(0, save_batch_size)
-                shape_images = render.render_shape(vertices, trans_vertices, images)
-                save_rendered_imgs(
-                    savefolder,
-                    k,
-                    images[bsize].clone(),
-                    landmarks_2d_gt.clone(),
-                    landmarks2d.clone(),
-                    landmarks3d.clone(),
-                    predicted_images[bsize].detach().cpu().float().clone(),
-                    shape_images[bsize].clone(),
-                    albedos[bsize].clone(),
-                    ops['albedo_images'].detach().cpu().clone()[bsize],
-                    tag='_verA'
-                )
-
-#             render_outputs = render_all(params_B, flame, flametex, render)
-            render_outputs = render_all(params_edit_B, flame, flametex, render)
-            vertices = render_outputs['vertices']
-            landmarks2d = render_outputs['landmarks2d']
-            landmarks3d = render_outputs['landmarks3d']
-            trans_vertices = render_outputs['trans_vertices']
-            albedos = render_outputs['albedos']
-            ops = render_outputs['ops']
-            predicted_images = ops['images']
             
-            
-            # Assign which set of data to write out
-            #
-            images = images_B
-            landmarks_2d_gt = landmarks_2d_gt_B
-            
-            if savefolder is not None:
-                bsize = range(0, save_batch_size)
-                shape_images = render.render_shape(vertices, trans_vertices, images)
-                save_rendered_imgs(
-                    savefolder,
-                    k,
-                    images[bsize].clone(),
-                    landmarks_2d_gt.clone(),
-                    landmarks2d.clone(),
-                    landmarks3d.clone(),
-                    predicted_images[bsize].detach().cpu().float().clone(),
-                    shape_images[bsize].clone(),
-                    albedos[bsize].clone(),
-                    ops['albedo_images'].detach().cpu().clone()[bsize],
-                    tag='_verB'
-                )
-
-
-    
-
-def train_distributed(args, config, savefolder, train_dir, dfr=None):
-    
-    if dfr is None:
-        dist.init_process_group(                                   
-            backend='nccl',                                         
-            init_method='env://'
-        )  
-    
-    
-    args.local_rank = torch.distributed.get_rank()
-    
-    
-    # this is the total # of GPUs across all nodes
-    # if using 2 nodes with 4 GPUs each, world size is 8
-    args.world_size = torch.distributed.get_world_size()
-    print("### global rank of curr node: {} of {}".format(torch.distributed.get_rank(),
-                                                         torch.distributed.get_world_size()))
-    if args.local_rank == 0:
-        print("training on ", train_dir)
-    
-    # For multiprocessing distributed, DistributedDataParallel constructor
-    # should always set the single device scope, otherwise,
-    # DistributedDataParallel will use all available devices.
-    #
-    torch.cuda.set_device(args.local_rank)
-
-    
-    
-    if dfr is None:
-        # Have not trained on any data (i.e. first pass in).
-        # Need to create.
+        # At the end of each epoch, check if we should save rendering/output
+        # and/or checkpoint.
         #
-        print("creating DFR model...")
-        dfr = DFRParamRegressor(config)
-        print("done")
-    if args.ckpt is not None:
-        dfr.load_state_dict(torch.load(args.ckpt)['dfr'], strict=False)
-        dfr.train();
-    
-    
-    flame = FLAME(config)
-    flametex = FLAMETex(config)
-    mesh_file = f'{args.flame_data}/head_template_mesh.obj'
-    render = Renderer(config.image_size, obj_filename=mesh_file)
-    
-    
-    dfr.cuda(args.local_rank)
-    flame.cuda(args.local_rank)
-    flametex.cuda(args.local_rank)
-    render.cuda(args.local_rank)
+        if args.local_rank == 0:    
+            if k % modulo_save_imgs == 0:
+#                 synchronize()
+    #             savefolder = path_save
+    #             render_outputs = render_all(params_A, flame, flametex, render)
+                render_outputs = render_all(params_edit_A, flame, flametex, render)
+                vertices = render_outputs['vertices']
+                landmarks2d = render_outputs['landmarks2d']
+                landmarks3d = render_outputs['landmarks3d']
+                trans_vertices = render_outputs['trans_vertices']
+                albedos = render_outputs['albedos']
+                ops = render_outputs['ops']
+                predicted_images = ops['images']
 
-    
-    texture_mean = flametex.get_texture_mean(args.batch_size) / 255.
-    texture_mean = texture_mean.cuda(args.local_rank)
-    
-    
-    batch_size = args.batch_size
-    workers = args.workers
-    
-    
-    dfr = torch.nn.parallel.DistributedDataParallel(
-        dfr,
-        device_ids=[args.local_rank],
-        output_device=args.local_rank
-    )
-#     flame = torch.nn.parallel.DistributedDataParallel(
-#         flame,
-#         device_ids=[args.local_rank],
-#         output_device=args.local_rank
-#     )
-#     flametex = torch.nn.parallel.DistributedDataParallel(
-#         flametex,
-#         device_ids=[args.local_rank],
-#         output_device=args.local_rank
-#     )
-#     render = torch.nn.parallel.DistributedDataParallel(
-#         render,
-#         device_ids=[args.local_rank],
-#         output_device=args.local_rank
-#     )
-    
-    
-    loss_l2 = LossL2() #.cuda(args.local_rank)
-    loss_ce = nn.CrossEntropyLoss() #.cuda(args.local_rank)
-    optim = torch.optim.Adam(
-                dfr.parameters(),
-                lr=1e-4,
-                weight_decay=0.00001 # config.e_wd
-    )
-    
-    
-    # To help convergence we train on multiple stages of data generated 
-    # with different truncation values. The idea being it is easier to
-    # learn on many examples that are very similar (low truncation value e.g. 0.2)
-    # and slowly incorporate more challenging and diverse examples 
-    # (high truncation, e.g. 0.7).
-    # 
-    
-    if args.local_rank == 0:
-        print("Training on ", train_dir, "...")
+                # Assign which set of data to write out
+                #
+                images = images_A
+                landmarks_2d_gt = landmarks_2d_gt_A
 
-    dataset = None
-#     path= '/home/ec2-user/SageMaker/train_data/trunc02'
-#     dataset = DatasetDFR(path)
-#     print("train_dir: ", train_dir)
-    dataset = DatasetDFR(train_dir)
-    # makes sure that each process gets a different slice of the training data
-    # during distributed training.
-    #
-    sampler = None
-    if args.distributed:
-        sampler = torch.utils.data.distributed.DistributedSampler(
-            dataset,
-            num_replicas=torch.cuda.device_count(),
-# #             num_replicas=4,
-#             rank = args.local_rank,
-        )
-
-#     loader = None
-    loader = torch.utils.data.DataLoader(
-        dataset=dataset,
-        batch_size=batch_size,
-        shuffle=(sampler is None),
-        num_workers=args.workers,
-#         collate_fn=collate_fn,
-        pin_memory=True,
-        sampler=sampler,
-        drop_last=True
-    )
-
-    if args.local_rank == 0:
-        losses_to_plot = {}
-        losses_to_plot['all_loss'] = []
-        losses_to_plot['landmark_2d'] = []
-        losses_to_plot['landmark_3d'] = []
-        losses_to_plot['shape_reg'] = []
-        losses_to_plot['shape_reg'] = []
-        losses_to_plot['expression_reg'] = []
-        losses_to_plot['pose_reg'] = []
-        losses_to_plot['photometric_texture'] = []
-        losses_to_plot['texture_reg'] = []
-
-
-    idx_rigid_stop = args.iter_rigid
-    modulo_save_imgs = args.iter_save_img
-    modulo_save_model = args.iter_save_ckpt
-    if args.save_batch_size < args.batch_size:
-        save_batch_size = args.save_batch_size 
-    else:
-        save_batch_size = args.batch_size
-    
-    
-    path_save = f'{savefolder}/{os.path.basename(train_dir)}'
-
-    # Start optimization
-    # -----------------------------
-    #
-    
-    # Check if we start with "rigid training" (just facial landmarks).
-    #
-    if idx_rigid_stop > 0:
-        k = 0
-        vertices = None
-        images = None
-        trans_vertices = None
-        landmarks2d = None
-        landmarks3d = None
-        pbar = tqdm(range(0, idx_rigid_stop), dynamic_ncols=True, smoothing=0.01)
-        for k in pbar:
-            if args.distributed:
-                sampler.set_epoch(k)
-
-    #         print("args.local_rank: ", args.local_rank)
-            for example in loader:
-                latents = example['latents'].cuda(args.local_rank)
-                landmarks_2d_gt = example['landmarks_2d_gt'].cuda(args.local_rank)
-                images = example['images'].cuda(args.local_rank)
-                image_masks = example['image_masks'].cuda(args.local_rank)
-
-    #             if args.local_rank == 0:
-    #                 print("2 step in rank: ", args.local_rank, flush=True)
-    #                 print(latents.shape)
-    #                 print(landmarks_2d_gt.shape)
-    #                 print(images.shape)
-    #                 print(image_masks.shape)
-
-
-                shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
-                vertices, landmarks2d, landmarks3d = flame(shape_params=shape,
-                                                           expression_params=expression,
-                                                           pose_params=pose)
-
-
-                trans_vertices = util.batch_orth_proj(vertices, cam); 
-                trans_vertices[..., 1:] = - trans_vertices[..., 1:]
-                landmarks2d = util.batch_orth_proj(landmarks2d, cam);
-                landmarks2d[..., 1:] = - landmarks2d[..., 1:]
-                landmarks3d = util.batch_orth_proj(landmarks3d, cam);
-                landmarks3d[..., 1:] = - landmarks3d[..., 1:]
-
-
-                losses = {}
-                losses['landmark_2d'] = loss_l2(
-                    landmarks2d[:, 17:, :2],
-                    landmarks_2d_gt[:, 17:, :2]
-                ) * config.w_lmks
-
-
-                all_loss = 0.
-                for key in losses.keys():
-                    all_loss = all_loss + losses[key]         
-                losses['all_loss'] = all_loss
-
-
-                optim.zero_grad()
-                all_loss.backward()
-                optim.step()
-
-
-                if args.local_rank == 0:
-                    for key in losses.keys():
-                        losses_to_plot[key].append(losses[key].item()) # Store for plotting later.
-                    losses_to_plot['all_loss'].append(losses['all_loss'].item())  
-
-
-    #             if args.local_rank == 0:
-                pbar.set_description(
-                    (
-                        f"total: {losses['all_loss']:.4f}; landmark_2d: {losses['landmark_2d']:.4f}; "
+                if savefolder is not None:
+                    bsize = range(0, save_batch_size)
+                    shape_images = render.render_shape(vertices, trans_vertices, images)
+                    save_rendered_imgs(
+                        savefolder,
+                        k,
+                        images[bsize].clone(),
+                        landmarks_2d_gt.clone(),
+                        landmarks2d.clone(),
+                        landmarks3d.clone(),
+                        predicted_images[bsize].detach().cpu().float().clone(),
+                        shape_images[bsize].clone(),
+                        albedos[bsize].clone(),
+                        ops['albedo_images'].detach().cpu().clone()[bsize],
+                        tag='_verA'
                     )
-                )
 
-        
-                # Visualize results.
+    #             render_outputs = render_all(params_B, flame, flametex, render)
+                render_outputs = render_all(params_edit_B, flame, flametex, render)
+                vertices = render_outputs['vertices']
+                landmarks2d = render_outputs['landmarks2d']
+                landmarks3d = render_outputs['landmarks3d']
+                trans_vertices = render_outputs['trans_vertices']
+                albedos = render_outputs['albedos']
+                ops = render_outputs['ops']
+                predicted_images = ops['images']
+
+
+                # Assign which set of data to write out
                 #
-                if args.local_rank == 0:
-                    if (k % modulo_save_imgs == 0):
-    #                     print("saving images...", path_save)
-                        bsize = range(0, save_batch_size)
-                        save_rendered_imgs(
-                            path_save,
-                            k,
-                            images[bsize].clone(),
-                            landmarks_2d_gt.clone(),
-                            landmarks2d.clone(),
-                            landmarks3d.clone(),
-                        )
+                images = images_B
+                landmarks_2d_gt = landmarks_2d_gt_B
+
+                if savefolder is not None:
+                    bsize = range(0, save_batch_size)
+                    shape_images = render.render_shape(vertices, trans_vertices, images)
+                    save_rendered_imgs(
+                        savefolder,
+                        k,
+                        images[bsize].clone(),
+                        landmarks_2d_gt.clone(),
+                        landmarks2d.clone(),
+                        landmarks3d.clone(),
+                        predicted_images[bsize].detach().cpu().float().clone(),
+                        shape_images[bsize].clone(),
+                        albedos[bsize].clone(),
+                        ops['albedo_images'].detach().cpu().clone()[bsize],
+                        tag='_verB'
+                    )
+                    
+            # Save current model.
+            #
+            if k % modulo_save_model == 0:
+                save_checkpoint(
+                    savefolder=savefolder,
+                    epoch=k,
+                    losses=losses_to_plot,
+                    model=rignet,
+                    optim=optim,
+                    distributed=args.distributed)
+
+                
+                
+    if args.local_rank == 0:
+        if k % modulo_save_model == 0:
+            save_checkpoint(
+                savefolder=savefolder,
+                epoch=k,
+                losses=losses_to_plot,
+                model=dfr,
+                optim=optim,
+                distributed=args.distributed)
 
 
-                # Save current model.
-                #
-                if args.local_rank == 0:
-                    if k % modulo_save_model == 0:
-                        save_checkpoint(
-                            path=path_save,
-                            epoch=k,
-                            losses=losses_to_plot,
-                            model=dfr,
-                            optim=optim)   
 
-
-        dist.barrier()
-                        
-        # Save final epoch for rigid fitting.
-        #
-        if args.local_rank == 0:
-            save_checkpoint(path=savefolder,
-                        epoch=k,
-                        losses=losses_to_plot,
-                        model=dfr,
-                        optim=optim)
-
-
-        if args.local_rank == 0:
-            print("DONE: rigid training...") 
-
-            
-        
-
-        
-        
-    # Add in the rendering
-    #
     
-    train_render(args, dfr, render, flame, flametex,
-                 texture_mean=texture_mean,
-                 optim=optim,
-                 savefolder=path_save,
-                 sampler=sampler,
-                 dataloader=loader,
-                 losses_to_plot=losses_to_plot if args.local_rank == 0 else None)
-    
-    
-    return dfr
+
+
 
 
         
@@ -1097,16 +1147,6 @@ def train_render(args, dfr, render, flame, flametex,
     
 
     
-    
-    
-
-
-
-    
-    
-
-    
-    
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--iter", type=int, default=50)
@@ -1127,152 +1167,103 @@ if __name__ == "__main__":
     parser.add_argument("--local_rank", type=int, default=0)
     parser.add_argument("--batch_size", type=int, default=10)
     parser.add_argument("--distributed", action='store_true')
-#     parser.add_argument("--flame_data", type=str, default=None)
-#     parser.add_argument("--train_data", type=str, default='/home/jupyter/train_data')
+
 
     
     args = parser.parse_args()
     assert args.batch_size >= args.save_batch_size
     
+    
     device = 'cuda'
     
-#     train_dir_A = f'{args.base_path}/train_data/rignet_A'
-#     train_dir_B = f'{args.base_path}/train_data/rignet_B'
-    train_dir_A = f'{args.base_path}/train_data/testing_A'
-    train_dir_B = f'{args.base_path}/train_data/testing_B'
-    print("train_dir: ", train_dir_A)
-    print("train_dir: ", train_dir_B)
-    dataset = DatasetSiamese(train_dir_A, train_dir_B)
-
-    batch_size = args.batch_size
-    sampler = None
-    # # if args.distributed:
-    # #     sampler = torch.utils.data.distributed.DistributedSampler(
-    # #         dataset,
-    # #         num_replicas=torch.cuda.device_count(),
-    # # # #             num_replicas=4,
-    # # #             rank = args.local_rank,
-    # #     )
-
-    loader = data.DataLoader(
-        dataset=dataset,
-        batch_size=batch_size,
-        shuffle=(sampler is None),
-        num_workers=args.workers,
-        collate_fn=collate_fn,
-        pin_memory=True,
-        sampler=sampler,
-        drop_last=True
-    )
     
-
-    
-      
     with open(f'{args.base_path}/photometric_optimization/configs/config.yaml') as f:
         config = yaml.safe_load(f)
 
-
-    model_params = config['model_params']
+        
     path_pretrained = f'{args.base_path}/pretrained_models'
+    model_params = config['model_params']
     model_params['flame_model_path'] = f'{path_pretrained}/generic_model.pkl'
     model_params['flame_lmk_embedding_path'] = f'{path_pretrained}/landmark_embedding.npy'
     model_params['tex_space_path'] = f'{path_pretrained}/FLAME_texture.npz'
-
-    # Load flame and render models.
-    #
-    render = load.renderer(args.base_path, model_params).cuda()
-    flame = load.flame(args.base_path, model_params).cuda()
-    flametex = load.flametex(args.base_path, model_params).cuda()
-    
-    # Load DFR, and RigNet models.
-    #
-    one_hot = True
-    rignet = load.rignet(args.base_path, one_hot=one_hot).cuda()
-    dfr = load.dfr(args.base_path, load_weights=True).cuda()
-
-    
-    # Kick off the training.
-    #
-    device = 'cuda'
-    train(args, model_params, loader, rignet, dfr, flame, flametex, render, device)
-    
     
 
-#     if args.distributed:
-#         print("Distributed training...")
-# #         from torch.multiprocessing import set_start_method
-# # #         try:
-# # #             set_start_method('spawn')
-# # #         except RuntimeError:
-# # #             pass
+    if args.distributed:
+        print("Distributed training...")
+#         from torch.multiprocessing import set_start_method
+# #         try:
+# #             set_start_method('spawn')
+# #         except RuntimeError:
+# #             pass
         
-#         # Create unique directory to save results.
-#         #
-#         from datetime import datetime
-#         now = datetime.now()
-#         dt_string = now.strftime("%d-%m-%Y_%H.%M.%S")     # dd/mm/YY H:M:S
-#         savefolder = os.path.sep.join(['./test_results', f'{dt_string}'])
-#         if not os.path.exists(savefolder):
-#             os.makedirs(savefolder, exist_ok=True)
+        # Create unique directory to save results.
+        #
+        from datetime import datetime
+        now = datetime.now()
+        dt_string = now.strftime("%d-%m-%Y_%H.%M.%S")     # dd/mm/YY H:M:S
+        savefolder = os.path.sep.join(['./test_results', f'{dt_string}'])
+        if not os.path.exists(savefolder):
+            os.makedirs(savefolder, exist_ok=True)
 
-#         # Sort the directories based on truncation value.
-#         # 
-#         truncation_dirs = glob.glob(args.train_data + "/*")
-#         truncation_dirs.sort(key=lambda x: int(''.join(filter(str.isdigit, x))))
-#         print("top: ", args.train_data)
-#         print("training dirs: ", truncation_dirs)
-        
 #         dfr = None
 #         for trunc_dir in truncation_dirs:
 #             dfr = train_distributed(args, config, savefolder, train_dir=trunc_dir, dfr=dfr)
 
-#         dist.destroy_process_group()
-#     else:
-#         print("NON-distributed training...")
-#         config.batch_size = args.batch_size
-#         dfr = DFRParamRegressor(config)
-#         if args.ckpt is not None:
-#             dfr.load_state_dict(torch.load(args.ckpt)['dfr'], strict=False)
-#             dfr.train();
+        train_distributed(args, model_params, savefolder)
+        dist.destroy_process_group()
+    else:
+        print("Beginning non-distributed training...")
+    #     train_dir_A = f'{args.base_path}/train_data/rignet_A'
+    #     train_dir_B = f'{args.base_path}/train_data/rignet_B'
+        train_dir_A = f'{args.base_path}/train_data/testing_A'
+        train_dir_B = f'{args.base_path}/train_data/testing_B'
+        print("train_dir: ", train_dir_A)
+        print("train_dir: ", train_dir_B)
+        dataset = DatasetSiamese(train_dir_A, train_dir_B)
+
+        batch_size = args.batch_size
+        sampler = None
+        loader = data.DataLoader(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=(sampler is None),
+            num_workers=args.workers,
+            collate_fn=collate_fn,
+            pin_memory=True,
+            sampler=sampler,
+            drop_last=True
+        )
+
+        # Load flame and render models.
+        #
+        render = load.renderer(args.base_path, model_params).cuda()
+        flame = load.flame(args.base_path, model_params).cuda()
+        flametex = load.flametex(args.base_path, model_params).cuda()
+
+        # Load DFR, and RigNet models.
+        #
+        one_hot = True
+        rignet = load.rignet(args.base_path, one_hot=one_hot, training=True).cuda()
+        dfr = load.dfr(args.base_path, load_weights=True).cuda()
+
+
+        # Kick off the training.
+        #
+        device = 'cuda'
+        train(args, model_params, loader, rignet, dfr, flame, flametex, render, device)        
+        
     
     
-#         flame = FLAME(config)
-#         flametex = FLAMETex(config)
-#         mesh_file = f'{args.flame_data}/head_template_mesh.obj'
-#         render = Renderer(config.image_size, obj_filename=mesh_file)
-
-        
-#         dataset = DatasetDFR(args.train_data)
-#         sampler = data_sampler(dataset, shuffle=True, distributed=args.distributed)
-#         dataloader = data.DataLoader(dataset,
-#                                      batch_size=args.batch_size,
-#                                      sampler=sampler,
-#                                      drop_last=True,
-#                                      num_workers=args.workers)
-        
-        
-#         texture_mean = flametex.get_texture_mean(args.batch_size) / 255.
-#         texture_mean = texture_mean.cuda()
-            
-            
-#         dfr.to(device)
-#         flame.to(device)
-#         render.to(device)
-#         flametex.to(device)
-
-        
-#         train(args, config, dataloader, dfr, flame, flametex, render, texture_mean, device)
-        
-        
-        
+# --------------------------------------------------
+#
 # Example commandline run:
 #
-# CUDA_VISIBLE_DEVICES=0 python train_rignet.py --save_batch_size=5 --batch_size=5 --iter=3 --iter_save_img=1 --workers=6 --base_path=/home/ec2-user/SageMaker
-#
+# CUDA_VISIBLE_DEVICES=0 python train_rignet.py --save_batch_size=5 --batch_size=5 --iter=3 --iter_save_img=1 --workers=6 --base_path=/home/ec2-user/SageMaker --distributed --workers=4
+
 # Distributed:
-# - example with 2 GPUs on 1 node.
+# - example with 4 GPUs on 1 node.
 #
-# CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node=4 --nnodes=1 train_dfr_regressor.py --iter=100 --iter_rigid=0 --iter_save_img=10 --iter_save_ckpt=10 --local_rank=0 --batch_size=32 --flame_data=/home/ec2-user/SageMaker/pretrained_models --train_data=/home/ec2-user/SageMaker/train_data --distributed --workers=4
+# CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node=4 --nnodes=1 train_rignet.py --save_batch_size=5 --batch_size=32 --iter=1000 --iter_save_img=25 --iter_save_ckpt=25 --base_path=/home/ec2-user/SageMaker --workers=7 --distributed
 
 # Debug:
 # You can see what all the threads are doing “sudo gdb -p … thread apply all bt"
