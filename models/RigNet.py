@@ -6,36 +6,6 @@ import numpy as np
 
 
 
-# class StyleEncoder(nn.Module):
-#     def __init__(self, dims_in=(18,512), dims_out=(18,32)):
-#         super(StyleEncoder, self).__init__()
-        
-#         self.dims_in = dims_in
-#         self.dims_out = dims_out
-        
-#         self.layers = [nn.Linear(dims_in[-1], dims_out[-1]) \
-#                        for _ in range(0, dims_in[0])]
-#         # Using ModuleList so that this layer list can be moved to CUDA                      
-#         self.layers = torch.nn.ModuleList(self.layers)
-        
-#     def forward(self, x):
-#         ''' 
-#         Pass each style dimension from w+ through the
-#         independent linear mapping network
-        
-#         args:
-#             x: w+ used with StyleGAN(2); dims=(18,512)
-#         returns:
-#             outputs: independent linear mapping to lower dimensional
-#                      space; dims=(18,32)
-#         '''
-#         outputs = []
-#         for style, layer in zip(x, self.layers):
-#             outputs.append(layer(style).unsqueeze(0))
-        
-#         outputs = torch.cat(outputs, dim=0)
-#         return outputs
-
 
 class StyleEncoder(nn.Module):
     def __init__(self, dims_in=(18,512), dims_out=(18,32), one_hot=True, num_classes=6):
@@ -46,15 +16,18 @@ class StyleEncoder(nn.Module):
         # shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
         
         self.one_hot = one_hot
-        if one_hot:
-            pass
-#             dims_out = (18, 32 + num_classes)
+#         if one_hot:
+#             dims_in = (dims_in[0], dims_in[-1] + num_classes)
             
         self.dims_in = dims_in
         self.dims_out = dims_out
         self.style_dim = dims_in[0] # 18
+        
+        # Build up the independent linear layers.
+        #
         self.layers = [nn.Linear(dims_in[-1], dims_out[-1]) \
                        for _ in range(0, dims_in[0])]
+        
         # Using ModuleList so that this layer list can be moved to CUDA                      
         self.layers = torch.nn.ModuleList(self.layers)
         
@@ -64,8 +37,8 @@ class StyleEncoder(nn.Module):
         independent linear mapping network
         
         args:
-            x: w+ used with StyleGAN(2); dims=(18,512)
-            label: one hot vector for classes
+            x: w+ used with StyleGAN(2); shape=(N, 18, 512)
+            labels: one hot vector for classes; shape=(N, 1, num_classes)
         returns:
             outputs: independent linear mapping to lower dimensional
                      space; dims=(18,32)
@@ -75,22 +48,20 @@ class StyleEncoder(nn.Module):
         if self.one_hot:
             labels = labels.to(dtype=x.dtype)
             labels = labels.repeat(1, self.style_dim, 1)
-            
+            x = torch.cat((x, labels), dim=-1)
+        
         for idx, layer in enumerate(self.layers):
-            out = layer(x[:,idx,:]).unsqueeze(1)
+            out = layer(x[:,idx,:])
+            out = out.unsqueeze(1) # [N,32] -> [N,1,32]
             outputs.append(out)
         
         outputs = torch.cat(outputs, dim=1)
 #         print("\noutputs: ", outputs.shape)
         
-        # Concatenate labels to encoded latents
-        #
-        if self.one_hot:
-            outputs = torch.cat((outputs, labels), dim=-1)
-#         print("outputs: ", outputs.shape)
         return outputs
-    
-    
+        
+        
+        
 class StyleDecoder(nn.Module):
     def __init__(self, dims_in, dims_out=(18, 512)):
         super(StyleDecoder, self).__init__()
@@ -109,8 +80,7 @@ class StyleDecoder(nn.Module):
         #
         self.layers = torch.nn.ModuleList(self.layers)
         
-    ### TODO
-    ### - Finish me
+
     def forward(self, w_enc, params):
         ''' 
         Concatenate x and p and then decode.
@@ -168,20 +138,20 @@ class RigNet(nn.Module):
     ):
         
         super(RigNet, self).__init__()
-        
-        # Instantiate the encoder, passing optional one-hot labels if we are
-        # conditionally transferring parameters.
-        #
-        self.encoder = StyleEncoder(dim_enc_in, dim_enc_out, one_hot, num_classes)
-        
+
         # If conditionally creating parameters, we add in the labels to the size
         # of the input to the decoder. That is, we are concatenating one-hot labels
         # to the input of each linear model in the decoder.
         #
         self.one_hot = one_hot
         if one_hot:
-            dim_dec_in = (dim_dec_in[0], dim_dec_in[-1] + num_classes)
-
+            dim_enc_in = (dim_enc_in[0], dim_enc_in[-1] + num_classes)
+        
+        # Instantiate the encoder, passing optional one-hot labels if we are
+        # conditionally transferring parameters.
+        #
+        self.encoder = StyleEncoder(dim_enc_in, dim_enc_out, one_hot, num_classes)
+        
         self.decoder = StyleDecoder(dim_dec_in, dim_dec_out)
         
         
@@ -202,3 +172,5 @@ class RigNet(nn.Module):
         output = torch.add(x, latent)
         
         return output    
+
+
