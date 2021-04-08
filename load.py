@@ -126,6 +126,43 @@ def rignet(base_path, load_weights=False, training=False, one_hot=False):
 
 
 
+def rignet_v2(base_path, load_weights=False, training=False):
+    sys.path.append(f'{base_path}/photometric_optimization/models')
+    from models.RigNet_v2 import RigNet    
+     
+    
+    # Initialize model 
+    #
+    notification = "Creating RigNet model..."
+    
+    
+    print(notification)
+    rignet = RigNet()
+    
+    
+    ### TODO:
+    ### - Need to update to properly load weights once training
+    ###   is done.
+    ###
+    if load_weights:
+        model_name = 'rignet_ckpt_epoch000025.pt'
+        local_path_to_model = f'{base_path}/pretrained_models' 
+        path_to_weights_rignet = f'{local_path_to_model}/{model_name}'
+        print("Loading weights... ", path_to_weights_rignet)
+        rignet.load_state_dict(torch.load(path_to_weights_rignet)['rignet'], strict=True)
+
+
+    if training:
+        rignet.train();
+        print("\tRigNet model in training mode...")
+    else:
+        rignet.eval();
+        print("\tRigNet model in eval mode...")
+    
+    return rignet
+
+
+
 def generator(base_path):
 #     sys.path.append(f'{base_path}/stylegan2_pytorch')
     path_stylegan = f'{base_path}/stylegan2_pytorch'

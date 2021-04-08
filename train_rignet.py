@@ -252,12 +252,12 @@ class LossL2(nn.Module):
     
 def latent_reconstruction_loss(rignet,
                                w_A, p_A,
-                               w_B, p_B, 
-                               labels_in, scale_recon=10.0):
+                               w_B, p_B,
+                               scale_recon=10.0):
     loss_recon = 0.0
-    w_reconA = rignet(w_A, p_A, labels_in) # Reconsruct self
+    w_reconA = rignet(w_A, p_A) # Reconsruct self
     loss_recon = (w_reconA - w_A).abs().square().mean() * scale_recon
-    w_reconB = rignet(w_B, p_B, labels_in) # Reconsruct self
+    w_reconB = rignet(w_B, p_B) # Reconsruct self
     loss_recon += (w_reconB - w_B).abs().square().mean() * scale_recon
     
     return loss_recon
@@ -349,7 +349,693 @@ def render_all(param, _flame, _flametex, _render):
 
 
     
-def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
+# def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
+#     from datetime import datetime
+#     now = datetime.now()
+#     dt_string = now.strftime("%d-%m-%Y_%H.%M.%S")     # dd/mm/YY H:M:S
+#     savefolder = os.path.sep.join(['./test_results', f'{dt_string}'])
+#     if not os.path.exists(savefolder):
+#         os.makedirs(savefolder, exist_ok=True)
+
+        
+# #     optim = torch.optim.Adam(rignet.parameters(), lr=1e-4)
+# #     optim = torch.optim.Adadelta(rignet.parameters(), lr=0.001) # default Adadelta
+# #     optim = torch.optim.SGD(rignet.parameters(), lr=0.01, momentum=.9) # default SGD # Trains
+# #     optim = torch.optim.RMSprop(rignet.parameters()) # default RMSprop
+#     optim = torch.optim.Adamax(rignet.parameters()) # default Adamax
+    
+    
+# #     loader = sample_data(loader)
+#     args.local_rank = 0
+
+    
+#     losses_to_plot = {}
+#     losses_to_plot['all_loss'] = []
+#     losses_to_plot['landmark_2d'] = []
+#     losses_to_plot['landmark_3d'] = []
+#     losses_to_plot['shape_reg'] = []
+#     losses_to_plot['shape_reg'] = []
+#     losses_to_plot['expression_reg'] = []
+#     losses_to_plot['pose_reg'] = []
+#     losses_to_plot['photometric_texture'] = []
+#     losses_to_plot['texture_reg'] = []
+    
+    
+#     loss_mse = nn.MSELoss().cuda()
+    
+    
+#     modulo_save_imgs = args.iter_save_img
+#     modulo_save_model = args.iter_save_ckpt
+    
+    
+#     # shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
+#     # onehot_cam = F.one_hot(torch.tensor([4]), 6).unsqueeze(0)
+# #     onehot_pose = F.one_hot(torch.tensor([2]), 6)#.unsqueeze(0)
+# #     # labels_in = torch.cat((onehot_pose, onehot_expr), dim=0).cuda()
+# #     labels_in = onehot_pose
+# #     labels_in = labels_in.expand(args.batch_size, -1, -1)
+# #     labels_in = labels_in.cuda()
+#     total_params = 6
+#     semantic_labels = np.array([0, 1, 2, 3, 4, 5]) # only using subset of [shape, expression, pose, tex, cam, lights]
+
+
+#     texture_mean = flametex.get_texture_mean(args.batch_size) / 255.
+#     texture_mean = texture_mean.cuda()
+    
+    
+#     save_batch_size = args.save_batch_size
+#     batch_size = args.batch_size
+    
+    
+#     pbar = tqdm(range(0, args.iter), dynamic_ncols=True, smoothing=0.01)
+#     k = 0
+#     for k in pbar:
+#         for A, B in loader:
+#             try:
+#                 w_A = A['latents'].cuda()
+#                 landmarks_2d_gt_A = A['landmarks_2d_gt'].cuda()
+#                 images_A = A['images'].cuda()
+#                 image_masks_A = A['image_masks'].cuda()
+
+#                 w_B = B['latents'].cuda()
+#                 landmarks_2d_gt_B = B['landmarks_2d_gt'].cuda()
+#                 images_B = B['images'].cuda()
+#                 image_masks_B = B['image_masks'].cuda()
+                
+#             except:
+#                 print('Skipping A, B = loader')
+#                 continue
+
+
+#             # 1) Calculate parameters from latents
+#             #
+#             # params_A = dfr(w_A.view(w_A.shape[0], -1))
+#             # params_B = dfr(w_B.view(w_B.shape[0], -1))
+#             params_A = dfr(nn.Flatten()(w_A))
+#             params_B = dfr(nn.Flatten()(w_B))
+            
+            
+#             # Randomly choose one of the semantic parameters to use as a label,
+#             # and later to be swapped out for rendering in the edit loss.
+#             #
+# #             semantic_idx = np.random.randint(low=0, high=len(semantic_labels), size=(1,)) 
+#             semantic_idx = 2
+#             semantic_param = semantic_labels[semantic_idx] # This will be used to swap edits to match the labels.
+#             labels_in = F.one_hot(torch.tensor([semantic_param]), total_params)
+#             labels_in = labels_in.expand(batch_size, -1, -1).cuda()
+            
+            
+#             # Enforce latents produced from RigNet are bound to the
+#             # original distribution.
+#             # That is, latents that create parameters, should be able
+#             # to take those parameters and re-generate the original latents.
+#             #
+#             # e.g. param = dfr(w); w_hat = rignet(w, param); MSE(w - w_hat)
+#             #
+#             labels_null = torch.zeros((batch_size, 1, total_params)).cuda()
+#             loss_recon = latent_reconstruction_loss(rignet,
+#                                                     w_A, params_A,
+#                                                     w_B, params_B,
+#                                                     labels_in=labels_null,
+#                                                     scale_recon=5.0)
+
+
+#             # 2) Transfer semantic "style" (e.g. pose) from one latent to another.
+#             #
+#             w_hat = rignet(w_A, params_B, labels_in)
+# #             w_AB = rignet(w_A, params_B, labels_in) # Transfer semantic params from B to latent A
+# #             w_BA = rignet(w_B, params_A, labels_in) # Transfer semantic params from A to latent B
+
+
+#             # 3) Create the cycle, where transferred parameter to latent, and latent to parameter
+#             #    should match.
+#             #
+#             p_hat = dfr(nn.Flatten()w_hat)
+# #             params_AB = dfr(nn.Flatten()(w_AB))
+# #             params_AB = np.array(params_AB)
+# #             params_BA = dfr(nn.Flatten()(w_BA))
+# #             params_BA = np.array(params_BA)
+            
+            
+#             # shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
+#             params_edit_A = None
+#             params_edit_B = None
+#             params_edit_A = np.array([x.detach().clone() for x in params_A])
+# #             params_edit_B = np.array([x.detach().clone() for x in params_B])
+
+
+#             params_edit_A[semantic_param] = params_AB[semantic_param] # Ensure pose is maintained
+# #             params_edit_B[semantic_param] = params_AB[semantic_param] # Ensure pose is maintained
+        
+# #             params_A[semantic_param] = params_BA[semantic_param] # Ensure pose is maintained
+# #             params_B[semantic_param] = params_AB[semantic_param] # Ensure pose is maintained
+
+
+#             loss_edit_A = rendering_loss(
+#                 args, k, texture_mean, A, params_edit_A, flame, flametex, render,
+#             )
+# #             loss_edit_B = rendering_loss(
+# #                 args, k, texture_mean, B, params_edit_B, flame, flametex, render,
+# #             )
+
+# #             loss_A = rendering_loss(
+# #                 args, k, texture_mean, A, params_edit_B, flame, flametex, render,
+# #             )
+# #             loss_B = rendering_loss(
+# #                 args, k, texture_mean, B, params_edit_A, flame, flametex, render,
+# #             )
+
+    
+#             # 4) Consistency loss
+#             # Assign all parameters that should not have been changed back to original
+#             # and rerender.
+#             #
+#             params_consistency_A = np.array([x.detach().clone() for x in params_A])
+            
+#             # Only want to assign what should not have changed, which are all other semantic params
+#             # other than the label that was chosen.
+#             #
+#             for label_idx in [x for x in semantic_labels if x != semantic_param]:
+#                 params_consistency_A[label_idx] = params_AB[label_idx]
+                
+#             loss_consistency_A = rendering_loss(
+#                 args, k, texture_mean, A, params_consistency_A, flame, flametex, render
+#             )
+            
+            
+            
+
+
+#             # Losses
+#             # ------------------------------------------------
+#             total_loss = 0.0
+            
+
+# #             loss_edit = loss_edit_A['all_loss'] + loss_edit_B['all_loss']
+#             loss_edit = loss_edit_A['all_loss']
+#             loss_edit *= 10.0
+        
+#             loss_consistency = loss_consistency_A['all_loss']
+#             loss_consistency *= 10.0
+
+
+#             total_loss += loss_recon
+#             total_loss += loss_edit 
+#             total_loss += loss_consistency
+
+
+#             optim.zero_grad()
+#             total_loss.backward()
+#             optim.step()
+
+            
+#             all_loss = 0.0
+# #             for key in loss_A.keys():
+# #                 all_loss = all_loss + loss_edit_A[key] + loss_edit_B[key]
+# #                 losses_to_plot[key].append(loss_edit_[key].item() + loss_edit_B[key].item()) # Store for plotting later.
+#             for key in loss_edit_A.keys():
+#                 all_loss = all_loss + loss_edit_A[key]
+#                 losses_to_plot[key].append(loss_edit_A[key].item()) # Store for plotting later.
+
+#             losses_to_plot['all_loss'].append(all_loss)
+
+            
+#             pbar.set_description(
+#                     (
+#                         f"total: {total_loss:.4f}; edit: {loss_edit:.4f}; recon: {loss_recon:.4f}; "
+#                         f"consistency: {loss_consistency:.4f}; "
+#                     )
+#                 )
+
+# #         if k % 100 == 0:
+# #             print("epoch: ", k, ", loss_edit: ", total_loss.item(), ", loss_recon: ", loss_recon.item())
+    
+
+#         if k % modulo_save_imgs == 0:
+#             render_outputs = render_all(params_edit_A, flame, flametex, render)
+#             vertices = render_outputs['vertices']
+#             landmarks2d = render_outputs['landmarks2d']
+#             landmarks3d = render_outputs['landmarks3d']
+#             trans_vertices = render_outputs['trans_vertices']
+#             albedos = render_outputs['albedos']
+#             ops = render_outputs['ops']
+#             predicted_images = ops['images']
+
+#             # Assign which set of data to write out
+#             #
+#             images = images_A
+#             landmarks_2d_gt = landmarks_2d_gt_A
+
+#             if savefolder is not None:
+#                 bsize = range(0, save_batch_size)
+#                 shape_images = render.render_shape(vertices, trans_vertices, images)
+#                 save_rendered_imgs(
+#                     savefolder,
+#                     k,
+#                     images[bsize].clone(),
+#                     landmarks_2d_gt.clone(),
+#                     landmarks2d.clone(),
+#                     landmarks3d.clone(),
+#                     predicted_images[bsize].detach().cpu().float().clone(),
+#                     shape_images[bsize].clone(),
+#                     albedos[bsize].clone(),
+#                     ops['albedo_images'].detach().cpu().clone()[bsize],
+#                     tag='_verA'
+#                 )
+            
+#             if params_edit_B is not None:
+#                 render_outputs = render_all(params_edit_B, flame, flametex, render)
+#                 vertices = render_outputs['vertices']
+#                 landmarks2d = render_outputs['landmarks2d']
+#                 landmarks3d = render_outputs['landmarks3d']
+#                 trans_vertices = render_outputs['trans_vertices']
+#                 albedos = render_outputs['albedos']
+#                 ops = render_outputs['ops']
+#                 predicted_images = ops['images']
+
+
+#                 # Assign which set of data to write out
+#                 #
+#                 images = images_B
+#                 landmarks_2d_gt = landmarks_2d_gt_B
+
+#                 if savefolder is not None:
+#                     bsize = range(0, save_batch_size)
+#                     shape_images = render.render_shape(vertices, trans_vertices, images)
+#                     save_rendered_imgs(
+#                         savefolder,
+#                         k,
+#                         images[bsize].clone(),
+#                         landmarks_2d_gt.clone(),
+#                         landmarks2d.clone(),
+#                         landmarks3d.clone(),
+#                         predicted_images[bsize].detach().cpu().float().clone(),
+#                         shape_images[bsize].clone(),
+#                         albedos[bsize].clone(),
+#                         ops['albedo_images'].detach().cpu().clone()[bsize],
+#                         tag='_verB'
+#                     )
+
+#         # Save current model.
+#         #
+#         if k % modulo_save_model == 0:
+#             save_checkpoint(
+#                 savefolder=savefolder,
+#                 epoch=k,
+#                 losses=losses_to_plot,
+#                 model=rignet,
+#                 optim=optim,
+#                 distributed=args.distributed)
+            
+#     # Save current model.
+#     #
+#     save_checkpoint(
+#         savefolder=savefolder,
+#         epoch=k,
+#         losses=losses_to_plot,
+#         model=rignet,
+#         optim=optim,
+#         distributed=args.distributed)
+
+
+
+
+# def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
+#     from datetime import datetime
+#     now = datetime.now()
+#     dt_string = now.strftime("%d-%m-%Y_%H.%M.%S")     # dd/mm/YY H:M:S
+#     savefolder = os.path.sep.join(['./test_results', f'{dt_string}'])
+#     if not os.path.exists(savefolder):
+#         os.makedirs(savefolder, exist_ok=True)
+
+        
+#     optim = torch.optim.Adam(rignet.parameters(), lr=1e-4)
+# #     optim = torch.optim.Adadelta(rignet.parameters(), lr=0.001) # default Adadelta
+# #     optim = torch.optim.SGD(rignet.parameters(), lr=0.01, momentum=.9) # default SGD # Trains
+# #     optim = torch.optim.RMSprop(rignet.parameters()) # default RMSprop
+# #     optim = torch.optim.Adamax(rignet.parameters()) # default Adamax
+    
+    
+# #     loader = sample_data(loader)
+#     args.local_rank = 0
+
+    
+#     losses_to_plot = {}
+#     losses_to_plot['all_loss'] = []
+#     losses_to_plot['landmark_2d'] = []
+#     losses_to_plot['landmark_3d'] = []
+#     losses_to_plot['shape_reg'] = []
+#     losses_to_plot['shape_reg'] = []
+#     losses_to_plot['expression_reg'] = []
+#     losses_to_plot['pose_reg'] = []
+#     losses_to_plot['photometric_texture'] = []
+#     losses_to_plot['texture_reg'] = []
+    
+    
+#     loss_mse = nn.MSELoss().cuda()
+    
+    
+#     modulo_save_imgs = args.iter_save_img
+#     modulo_save_model = args.iter_save_ckpt
+    
+    
+# #     # shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
+# #     # onehot_cam = F.one_hot(torch.tensor([4]), 6).unsqueeze(0)
+# # #     onehot_pose = F.one_hot(torch.tensor([2]), 6)#.unsqueeze(0)
+# # #     # labels_in = torch.cat((onehot_pose, onehot_expr), dim=0).cuda()
+# # #     labels_in = onehot_pose
+# # #     labels_in = labels_in.expand(args.batch_size, -1, -1)
+# # #     labels_in = labels_in.cuda()
+# #     total_params = 6
+# #     semantic_labels = np.array([0, 1, 2, 3, 4, 5]) # only using subset of [shape, expression, pose, tex, cam, lights]
+
+
+#     texture_mean = flametex.get_texture_mean(args.batch_size) / 255.
+#     texture_mean = texture_mean.cuda()
+    
+    
+#     save_batch_size = args.save_batch_size
+#     batch_size = args.batch_size
+    
+    
+#     pbar = tqdm(range(0, args.iter), dynamic_ncols=True, smoothing=0.01)
+#     k = 0
+#     for k in pbar:
+#         for A, B in loader:
+#             try:
+#                 w_A = A['latents'].cuda()
+#                 landmarks_2d_gt_A = A['landmarks_2d_gt'].cuda()
+#                 images_A = A['images'].cuda()
+#                 image_masks_A = A['image_masks'].cuda()
+
+#                 w_B = B['latents'].cuda()
+#                 landmarks_2d_gt_B = B['landmarks_2d_gt'].cuda()
+#                 images_B = B['images'].cuda()
+#                 image_masks_B = B['image_masks'].cuda()
+                
+#             except:
+#                 print('Skipping A, B = loader')
+#                 continue
+
+
+#             # 1) Calculate parameters from latents
+#             #
+#             # params_A = dfr(w_A.view(w_A.shape[0], -1))
+#             # params_B = dfr(w_B.view(w_B.shape[0], -1))
+#             params_A = dfr(nn.Flatten()(w_A))
+#             params_B = dfr(nn.Flatten()(w_B))
+            
+            
+#             # Randomly choose one of the semantic parameters to use as a label,
+#             # and later to be swapped out for rendering in the edit loss.
+#             #
+# #             semantic_idx = np.random.randint(low=0, high=len(semantic_labels), size=(1,)) 
+#             semantic_idx = 2
+#             semantic_param = semantic_labels[semantic_idx] # This will be used to swap edits to match the labels.
+#             labels_in = F.one_hot(torch.tensor([semantic_param]), total_params)
+#             labels_in = labels_in.expand(batch_size, -1, -1).cuda()
+            
+            
+#             # Enforce latents produced from RigNet are bound to the
+#             # original distribution.
+#             # That is, latents that create parameters, should be able
+#             # to take those parameters and re-generate the original latents.
+#             #
+#             # e.g. param = dfr(w); w_hat = rignet(w, param); MSE(w - w_hat)
+#             #
+#             labels_null = torch.zeros((batch_size, 1, total_params)).cuda()
+#             loss_recon = latent_reconstruction_loss(rignet,
+#                                                     w_A, params_A,
+#                                                     w_B, params_B,
+#                                                     labels_in=labels_null,
+#                                                     scale_recon=1.0)
+
+
+#             # 2) Transfer semantic "style" (e.g. pose) from one latent to another.
+#             #
+#             w_hat = rignet(w_A, params_B, labels_in)
+
+
+#             # 3) Create the cycle, where transferred parameter to latent, and latent to parameter
+#             #    should match.
+#             #
+#             p_hat = dfr(nn.Flatten()(w_hat))
+            
+            
+#             # shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
+#             params_edit_A = None
+#             params_edit_B = None
+#             params_edit_B = np.array([x.detach().clone() for x in params_B])
+
+
+# #             params_edit_A[semantic_param] = params_AB[semantic_param] # Ensure pose is maintained
+#             p_hat = np.asarray(p_hat)
+#             params_edit_B[semantic_param] = p_hat[semantic_param] # Ensure pose is maintained
+
+
+# #             loss_edit_A = rendering_loss(
+# #                 args, k, texture_mean, A, params_edit_A, flame, flametex, render,
+# #             )
+#             loss_edit_B = rendering_loss(
+#                 args, k, texture_mean, B, params_edit_B, flame, flametex, render,
+#             )
+
+# #             loss_A = rendering_loss(
+# #                 args, k, texture_mean, A, params_edit_B, flame, flametex, render,
+# #             )
+# #             loss_B = rendering_loss(
+# #                 args, k, texture_mean, B, params_edit_A, flame, flametex, render,
+# #             )
+
+    
+#             # 4) Consistency loss
+#             # Assign all parameters that should not have been changed back to original
+#             # and rerender.
+#             #
+#             params_consistency_A = np.array([x for x in p_hat])
+            
+            
+#             # Only want to assign what should not have changed, which are all other semantic params
+#             # other than the label that was chosen.
+#             #
+# #             for label_idx in [x for x in semantic_labels if x != semantic_param]:
+# #                 params_consistency_A[label_idx] = params_AB[label_idx]
+#             params_consistency_A[semantic_param] = params_A[semantic_param]
+                    
+            
+#             loss_consistency_A = rendering_loss(
+#                 args, k, texture_mean, A, params_consistency_A, flame, flametex, render
+#             )
+            
+
+#             # Losses
+#             # ------------------------------------------------
+#             total_loss = 0.0
+#             loss_edit = 0.0
+#             loss_consistency = 0.0
+            
+
+# #             loss_edit = loss_edit_A['all_loss'] + loss_edit_B['all_loss']
+#             loss_edit = loss_edit_B['all_loss']
+#             loss_edit *= 10.0
+        
+#             loss_consistency = loss_consistency_A['all_loss']
+#             loss_consistency *= 2.0
+
+
+#             total_loss += loss_recon
+#             total_loss += loss_edit 
+#             total_loss += loss_consistency
+
+
+#             optim.zero_grad()
+#             total_loss.backward()
+#             optim.step()
+
+            
+#             all_loss = 0.0
+# #             for key in loss_A.keys():
+# #                 all_loss = all_loss + loss_edit_A[key] + loss_edit_B[key]
+# #                 losses_to_plot[key].append(loss_edit_[key].item() + loss_edit_B[key].item()) # Store for plotting later.
+#             for key in loss_edit_B.keys():
+#                 all_loss = all_loss + loss_edit_B[key]
+#                 losses_to_plot[key].append(loss_edit_B[key].item()) # Store for plotting later.
+
+#             losses_to_plot['all_loss'].append(all_loss)
+
+            
+#             pbar.set_description(
+#                     (
+#                         f"total: {total_loss:.4f}; edit: {loss_edit:.4f}; recon: {loss_recon:.4f}; "
+#                         f"consistency: {loss_consistency:.4f}; "
+#                     )
+#                 )
+
+# #         if k % 100 == 0:
+# #             print("epoch: ", k, ", loss_edit: ", total_loss.item(), ", loss_recon: ", loss_recon.item())
+    
+
+#         if k % modulo_save_imgs == 0:
+#             if params_edit_A is not None:
+#                 render_outputs = render_all(params_edit_A, flame, flametex, render)
+#                 vertices = render_outputs['vertices']
+#                 landmarks2d = render_outputs['landmarks2d']
+#                 landmarks3d = render_outputs['landmarks3d']
+#                 trans_vertices = render_outputs['trans_vertices']
+#                 albedos = render_outputs['albedos']
+#                 ops = render_outputs['ops']
+#                 predicted_images = ops['images']
+
+#                 # Assign which set of data to write out
+#                 #
+#                 images = images_A
+#                 landmarks_2d_gt = landmarks_2d_gt_A
+
+#                 if savefolder is not None:
+#                     bsize = range(0, save_batch_size)
+#                     shape_images = render.render_shape(vertices, trans_vertices, images)
+#                     save_rendered_imgs(
+#                         savefolder,
+#                         k,
+#                         images[bsize].clone(),
+#                         landmarks_2d_gt.clone(),
+#                         landmarks2d.clone(),
+#                         landmarks3d.clone(),
+#                         predicted_images[bsize].detach().cpu().float().clone(),
+#                         shape_images[bsize].clone(),
+#                         albedos[bsize].clone(),
+#                         ops['albedo_images'].detach().cpu().clone()[bsize],
+#                         tag='_verA'
+#                     )
+            
+#             if params_edit_B is not None:
+#                 render_outputs = render_all(params_edit_B, flame, flametex, render)
+#                 vertices = render_outputs['vertices']
+#                 landmarks2d = render_outputs['landmarks2d']
+#                 landmarks3d = render_outputs['landmarks3d']
+#                 trans_vertices = render_outputs['trans_vertices']
+#                 albedos = render_outputs['albedos']
+#                 ops = render_outputs['ops']
+#                 predicted_images = ops['images']
+
+
+#                 # Assign which set of data to write out
+#                 #
+#                 images = images_B
+#                 landmarks_2d_gt = landmarks_2d_gt_B
+
+#                 if savefolder is not None:
+#                     bsize = range(0, save_batch_size)
+#                     shape_images = render.render_shape(vertices, trans_vertices, images)
+#                     save_rendered_imgs(
+#                         savefolder,
+#                         k,
+#                         images[bsize].clone(),
+#                         landmarks_2d_gt.clone(),
+#                         landmarks2d.clone(),
+#                         landmarks3d.clone(),
+#                         predicted_images[bsize].detach().cpu().float().clone(),
+#                         shape_images[bsize].clone(),
+#                         albedos[bsize].clone(),
+#                         ops['albedo_images'].detach().cpu().clone()[bsize],
+#                         tag='_verB'
+#                     )
+
+#         # Save current model.
+#         #
+#         if k % modulo_save_model == 0:
+#             save_checkpoint(
+#                 savefolder=savefolder,
+#                 epoch=k,
+#                 losses=losses_to_plot,
+#                 model=rignet,
+#                 optim=optim,
+#                 distributed=args.distributed)
+            
+            
+#     # Save on last epoch
+#     # ------------------------
+#     #
+    
+#     # Save current model.
+#     #
+#     save_checkpoint(
+#         savefolder=savefolder,
+#         epoch=k,
+#         losses=losses_to_plot,
+#         model=rignet,
+#         optim=optim,
+#         distributed=args.distributed)
+    
+    
+#     if params_edit_A is not None:
+#         render_outputs = render_all(params_edit_A, flame, flametex, render)
+#         vertices = render_outputs['vertices']
+#         landmarks2d = render_outputs['landmarks2d']
+#         landmarks3d = render_outputs['landmarks3d']
+#         trans_vertices = render_outputs['trans_vertices']
+#         albedos = render_outputs['albedos']
+#         ops = render_outputs['ops']
+#         predicted_images = ops['images']
+
+#         # Assign which set of data to write out
+#         #
+#         images = images_A
+#         landmarks_2d_gt = landmarks_2d_gt_A
+
+#         if savefolder is not None:
+#             bsize = range(0, save_batch_size)
+#             shape_images = render.render_shape(vertices, trans_vertices, images)
+#             save_rendered_imgs(
+#                 savefolder,
+#                 k,
+#                 images[bsize].clone(),
+#                 landmarks_2d_gt.clone(),
+#                 landmarks2d.clone(),
+#                 landmarks3d.clone(),
+#                 predicted_images[bsize].detach().cpu().float().clone(),
+#                 shape_images[bsize].clone(),
+#                 albedos[bsize].clone(),
+#                 ops['albedo_images'].detach().cpu().clone()[bsize],
+#                 tag='_verA'
+#             )
+
+#     if params_edit_B is not None:
+#         render_outputs = render_all(params_edit_B, flame, flametex, render)
+#         vertices = render_outputs['vertices']
+#         landmarks2d = render_outputs['landmarks2d']
+#         landmarks3d = render_outputs['landmarks3d']
+#         trans_vertices = render_outputs['trans_vertices']
+#         albedos = render_outputs['albedos']
+#         ops = render_outputs['ops']
+#         predicted_images = ops['images']
+
+
+#         # Assign which set of data to write out
+#         #
+#         images = images_B
+#         landmarks_2d_gt = landmarks_2d_gt_B
+
+#         if savefolder is not None:
+#             bsize = range(0, save_batch_size)
+#             shape_images = render.render_shape(vertices, trans_vertices, images)
+#             save_rendered_imgs(
+#                 savefolder,
+#                 k,
+#                 images[bsize].clone(),
+#                 landmarks_2d_gt.clone(),
+#                 landmarks2d.clone(),
+#                 landmarks3d.clone(),
+#                 predicted_images[bsize].detach().cpu().float().clone(),
+#                 shape_images[bsize].clone(),
+#                 albedos[bsize].clone(),
+#                 ops['albedo_images'].detach().cpu().clone()[bsize],
+#                 tag='_verB'
+#             )
+
+
+
+def train_v2(args, config, loader, rignet, dfr, flame, flametex, render, device):
     from datetime import datetime
     now = datetime.now()
     dt_string = now.strftime("%d-%m-%Y_%H.%M.%S")     # dd/mm/YY H:M:S
@@ -388,15 +1074,15 @@ def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
     modulo_save_model = args.iter_save_ckpt
     
     
-    # shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
-    # onehot_cam = F.one_hot(torch.tensor([4]), 6).unsqueeze(0)
-#     onehot_pose = F.one_hot(torch.tensor([2]), 6)#.unsqueeze(0)
-#     # labels_in = torch.cat((onehot_pose, onehot_expr), dim=0).cuda()
-#     labels_in = onehot_pose
-#     labels_in = labels_in.expand(args.batch_size, -1, -1)
-#     labels_in = labels_in.cuda()
-    total_params = 6
-    semantic_labels = np.array([0, 1, 2, 3, 4, 5]) # only using subset of [shape, expression, pose, tex, cam, lights]
+#     # shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
+#     # onehot_cam = F.one_hot(torch.tensor([4]), 6).unsqueeze(0)
+# #     onehot_pose = F.one_hot(torch.tensor([2]), 6)#.unsqueeze(0)
+# #     # labels_in = torch.cat((onehot_pose, onehot_expr), dim=0).cuda()
+# #     labels_in = onehot_pose
+# #     labels_in = labels_in.expand(args.batch_size, -1, -1)
+# #     labels_in = labels_in.cuda()
+#     total_params = 6
+#     semantic_labels = np.array([0, 1, 2, 3, 4, 5]) # only using subset of [shape, expression, pose, tex, cam, lights]
 
 
     texture_mean = flametex.get_texture_mean(args.batch_size) / 255.
@@ -405,6 +1091,9 @@ def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
     
     save_batch_size = args.save_batch_size
     batch_size = args.batch_size
+    
+    
+    semantic_param = 2 # pose
     
     
     pbar = tqdm(range(0, args.iter), dynamic_ncols=True, smoothing=0.01)
@@ -435,15 +1124,6 @@ def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
             params_B = dfr(nn.Flatten()(w_B))
             
             
-            # Randomly choose one of the semantic parameters to use as a label,
-            # and later to be swapped out for rendering in the edit loss.
-            #
-            semantic_idx = np.random.randint(low=0, high=len(semantic_labels), size=(1,)) 
-            semantic_param = semantic_labels[semantic_idx] # This will be used to swap edits to match the labels.
-            labels_in = F.one_hot(torch.tensor([semantic_param]), total_params)
-            labels_in = labels_in.expand(batch_size, -1, -1).cuda()
-            
-            
             # Enforce latents produced from RigNet are bound to the
             # original distribution.
             # That is, latents that create parameters, should be able
@@ -451,49 +1131,41 @@ def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
             #
             # e.g. param = dfr(w); w_hat = rignet(w, param); MSE(w - w_hat)
             #
-            labels_null = torch.zeros((batch_size, 1, total_params)).cuda()
             loss_recon = latent_reconstruction_loss(rignet,
-                                                    w_A, params_A,
-                                                    w_B, params_B,
-                                                    labels_in=labels_null,
-                                                    scale_recon=5.0)
+                                                    w_A, params_A[semantic_param],
+                                                    w_B, params_B[semantic_param],
+                                                    scale_recon=1.0)
 
 
             # 2) Transfer semantic "style" (e.g. pose) from one latent to another.
             #
-            w_AB = rignet(w_A, params_B, labels_in) # Transfer semantic params from B to latent A
-#             w_BA = rignet(w_B, params_A, labels_in) # Transfer semantic params from A to latent B
+            w_hat = rignet(w_A, params_B[semantic_param])
 
 
             # 3) Create the cycle, where transferred parameter to latent, and latent to parameter
             #    should match.
             #
-            params_AB = dfr(nn.Flatten()(w_AB))
-            params_AB = np.array(params_AB)
-#             params_BA = dfr(nn.Flatten()(w_BA))
-#             params_BA = np.array(params_BA)
+            p_hat = dfr(nn.Flatten()(w_hat))
             
             
             # shape, expression, pose, tex, cam, lights = dfr(latents.view(args.batch_size, -1))
             params_edit_A = None
             params_edit_B = None
-            params_edit_A = np.array([x.detach().clone() for x in params_A])
-#             params_edit_B = np.array([x.detach().clone() for x in params_B])
+            params_edit_B = np.array([x for x in params_B])
 
 
-            params_edit_A[semantic_param] = params_AB[semantic_param] # Ensure pose is maintained
-#             params_edit_B[semantic_param] = params_AB[semantic_param] # Ensure pose is maintained
-        
-#             params_A[semantic_param] = params_BA[semantic_param] # Ensure pose is maintained
-#             params_B[semantic_param] = params_AB[semantic_param] # Ensure pose is maintained
+
+#             params_edit_A[semantic_param] = params_AB[semantic_param] # Ensure pose is maintained
+            p_hat = np.asarray(p_hat)
+            params_edit_B[semantic_param] = p_hat[semantic_param] # Ensure pose is maintained
 
 
-            loss_edit_A = rendering_loss(
-                args, k, texture_mean, A, params_edit_A, flame, flametex, render,
-            )
-#             loss_edit_B = rendering_loss(
-#                 args, k, texture_mean, B, params_edit_B, flame, flametex, render,
+#             loss_edit_A = rendering_loss(
+#                 args, k, texture_mean, A, params_edit_A, flame, flametex, render,
 #             )
+            loss_edit_B = rendering_loss(
+                args, k, texture_mean, B, params_edit_B, flame, flametex, render,
+            )
 
 #             loss_A = rendering_loss(
 #                 args, k, texture_mean, A, params_edit_B, flame, flametex, render,
@@ -507,29 +1179,31 @@ def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
             # Assign all parameters that should not have been changed back to original
             # and rerender.
             #
-            params_consistency_A = np.array([x.detach().clone() for x in params_A])
+            params_consistency_A = np.array([x for x in p_hat])
+            
             
             # Only want to assign what should not have changed, which are all other semantic params
             # other than the label that was chosen.
             #
-            for label_idx in [x for x in semantic_labels if x != semantic_param]:
-                params_consistency_A[label_idx] = params_AB[label_idx]
-                
+#             for label_idx in [x for x in semantic_labels if x != semantic_param]:
+#                 params_consistency_A[label_idx] = params_AB[label_idx]
+            params_consistency_A[semantic_param] = params_A[semantic_param]
+                    
+            
             loss_consistency_A = rendering_loss(
                 args, k, texture_mean, A, params_consistency_A, flame, flametex, render
             )
             
-            
-            
-
 
             # Losses
             # ------------------------------------------------
             total_loss = 0.0
+            loss_edit = 0.0
+            loss_consistency = 0.0
             
 
 #             loss_edit = loss_edit_A['all_loss'] + loss_edit_B['all_loss']
-            loss_edit = loss_edit_A['all_loss']
+            loss_edit = loss_edit_B['all_loss']
             loss_edit *= 10.0
         
             loss_consistency = loss_consistency_A['all_loss']
@@ -550,9 +1224,9 @@ def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
 #             for key in loss_A.keys():
 #                 all_loss = all_loss + loss_edit_A[key] + loss_edit_B[key]
 #                 losses_to_plot[key].append(loss_edit_[key].item() + loss_edit_B[key].item()) # Store for plotting later.
-            for key in loss_edit_A.keys():
-                all_loss = all_loss + loss_edit_A[key]
-                losses_to_plot[key].append(loss_edit_A[key].item()) # Store for plotting later.
+            for key in loss_edit_B.keys():
+                all_loss = all_loss + loss_edit_B[key]
+                losses_to_plot[key].append(loss_edit_B[key].item()) # Store for plotting later.
 
             losses_to_plot['all_loss'].append(all_loss)
 
@@ -569,36 +1243,37 @@ def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
     
 
         if k % modulo_save_imgs == 0:
-            render_outputs = render_all(params_edit_A, flame, flametex, render)
-            vertices = render_outputs['vertices']
-            landmarks2d = render_outputs['landmarks2d']
-            landmarks3d = render_outputs['landmarks3d']
-            trans_vertices = render_outputs['trans_vertices']
-            albedos = render_outputs['albedos']
-            ops = render_outputs['ops']
-            predicted_images = ops['images']
+            if params_edit_A is not None:
+                render_outputs = render_all(params_edit_A, flame, flametex, render)
+                vertices = render_outputs['vertices']
+                landmarks2d = render_outputs['landmarks2d']
+                landmarks3d = render_outputs['landmarks3d']
+                trans_vertices = render_outputs['trans_vertices']
+                albedos = render_outputs['albedos']
+                ops = render_outputs['ops']
+                predicted_images = ops['images']
 
-            # Assign which set of data to write out
-            #
-            images = images_A
-            landmarks_2d_gt = landmarks_2d_gt_A
+                # Assign which set of data to write out
+                #
+                images = images_A
+                landmarks_2d_gt = landmarks_2d_gt_A
 
-            if savefolder is not None:
-                bsize = range(0, save_batch_size)
-                shape_images = render.render_shape(vertices, trans_vertices, images)
-                save_rendered_imgs(
-                    savefolder,
-                    k,
-                    images[bsize].clone(),
-                    landmarks_2d_gt.clone(),
-                    landmarks2d.clone(),
-                    landmarks3d.clone(),
-                    predicted_images[bsize].detach().cpu().float().clone(),
-                    shape_images[bsize].clone(),
-                    albedos[bsize].clone(),
-                    ops['albedo_images'].detach().cpu().clone()[bsize],
-                    tag='_verA'
-                )
+                if savefolder is not None:
+                    bsize = range(0, save_batch_size)
+                    shape_images = render.render_shape(vertices, trans_vertices, images)
+                    save_rendered_imgs(
+                        savefolder,
+                        k,
+                        images[bsize].clone(),
+                        landmarks_2d_gt.clone(),
+                        landmarks2d.clone(),
+                        landmarks3d.clone(),
+                        predicted_images[bsize].detach().cpu().float().clone(),
+                        shape_images[bsize].clone(),
+                        albedos[bsize].clone(),
+                        ops['albedo_images'].detach().cpu().clone()[bsize],
+                        tag='_verA'
+                    )
             
             if params_edit_B is not None:
                 render_outputs = render_all(params_edit_B, flame, flametex, render)
@@ -644,6 +1319,11 @@ def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
                 optim=optim,
                 distributed=args.distributed)
             
+            
+    # Save on last epoch
+    # ------------------------
+    #
+    
     # Save current model.
     #
     save_checkpoint(
@@ -653,6 +1333,74 @@ def train(args, config, loader, rignet, dfr, flame, flametex, render, device):
         model=rignet,
         optim=optim,
         distributed=args.distributed)
+    
+    
+    if params_edit_A is not None:
+        render_outputs = render_all(params_edit_A, flame, flametex, render)
+        vertices = render_outputs['vertices']
+        landmarks2d = render_outputs['landmarks2d']
+        landmarks3d = render_outputs['landmarks3d']
+        trans_vertices = render_outputs['trans_vertices']
+        albedos = render_outputs['albedos']
+        ops = render_outputs['ops']
+        predicted_images = ops['images']
+
+        # Assign which set of data to write out
+        #
+        images = images_A
+        landmarks_2d_gt = landmarks_2d_gt_A
+
+        if savefolder is not None:
+            bsize = range(0, save_batch_size)
+            shape_images = render.render_shape(vertices, trans_vertices, images)
+            save_rendered_imgs(
+                savefolder,
+                k,
+                images[bsize].clone(),
+                landmarks_2d_gt.clone(),
+                landmarks2d.clone(),
+                landmarks3d.clone(),
+                predicted_images[bsize].detach().cpu().float().clone(),
+                shape_images[bsize].clone(),
+                albedos[bsize].clone(),
+                ops['albedo_images'].detach().cpu().clone()[bsize],
+                tag='_verA'
+            )
+
+    if params_edit_B is not None:
+        render_outputs = render_all(params_edit_B, flame, flametex, render)
+        vertices = render_outputs['vertices']
+        landmarks2d = render_outputs['landmarks2d']
+        landmarks3d = render_outputs['landmarks3d']
+        trans_vertices = render_outputs['trans_vertices']
+        albedos = render_outputs['albedos']
+        ops = render_outputs['ops']
+        predicted_images = ops['images']
+
+
+        # Assign which set of data to write out
+        #
+        images = images_B
+        landmarks_2d_gt = landmarks_2d_gt_B
+
+        if savefolder is not None:
+            bsize = range(0, save_batch_size)
+            shape_images = render.render_shape(vertices, trans_vertices, images)
+            save_rendered_imgs(
+                savefolder,
+                k,
+                images[bsize].clone(),
+                landmarks_2d_gt.clone(),
+                landmarks2d.clone(),
+                landmarks3d.clone(),
+                predicted_images[bsize].detach().cpu().float().clone(),
+                shape_images[bsize].clone(),
+                albedos[bsize].clone(),
+                ops['albedo_images'].detach().cpu().clone()[bsize],
+                tag='_verB'
+            )
+            
+            
 
 
                 
@@ -1292,15 +2040,16 @@ if __name__ == "__main__":
 
         # Load DFR, and RigNet models.
         #
-        one_hot = True
-        rignet = load.rignet(args.base_path, one_hot=one_hot, training=True).cuda()
+#         one_hot = True
+#         rignet = load.rignet(args.base_path, one_hot=one_hot, training=True).cuda()
+        rignet = load.rignet_v2(args.base_path, training=True).cuda()
         dfr = load.dfr(args.base_path, load_weights=True, training=False).cuda()
 
 
         # Kick off the training.
         #
         device = 'cuda'
-        train(args, model_params, loader, rignet, dfr, flame, flametex, render, device)        
+        train_v2(args, model_params, loader, rignet, dfr, flame, flametex, render, device)        
         
     
     
@@ -1308,7 +2057,7 @@ if __name__ == "__main__":
 #
 # Example commandline run:
 #
-# CUDA_VISIBLE_DEVICES=0 python train_rignet.py --save_batch_size=5 --batch_size=5 --iter=3 --iter_save_img=1 --workers=4 --base_path=/home/ec2-user/SageMaker
+# photometric_optimization]$ CUDA_VISIBLE_DEVICES=0 python train_rignet.py --save_batch_size=5 --batch_size=8 --iter=100 --iter_save_img=10 --workers=4 --base_path=/home/ec2-user/SageMaker
 
 # Distributed:
 # - example with 4 GPUs on 1 node.
